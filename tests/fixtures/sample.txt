@@ -1,0 +1,3 @@
+Oasis is a natural-language file search tool.
+It combines keyword and semantic retrieval to help you find files fast.
+This is a plain text fixture used for testing the TextExtractor.
