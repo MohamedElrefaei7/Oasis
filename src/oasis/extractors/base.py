@@ -1,24 +1,12 @@
 from pathlib import Path
 from typing import Protocol
 
-from pydantic import BaseModel
-
-
-class FileMetadata(BaseModel):
-    size_bytes: int
-    mtime: float
-    extension: str
-
-
-class ExtractedDocument(BaseModel):
-    path: Path
-    content: str
-    language: str | None
-    metadata: FileMetadata
+from oasis.models import ExtractedDocument
 
 
 class Extractor(Protocol):
-    @property
-    def supported_extensions(self) -> list[str]: ...
+    extensions: frozenset[str]
 
-    def extract(self, path: Path) -> ExtractedDocument: ...
+    def can_handle(self, path: Path) -> bool: ...
+
+    def extract(self, path: Path) -> ExtractedDocument | None: ...

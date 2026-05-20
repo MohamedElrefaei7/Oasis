@@ -4,34 +4,38 @@ from pathlib import Path
 from langdetect import detect
 from langdetect.lang_detect_exception import LangDetectException
 
-from oasis.extractors.base import ExtractedDocument, FileMetadata
+from oasis.models import DocumentMetadata, ExtractedDocument
 
 logger = logging.getLogger(__name__)
 
 
 class TextExtractor:
-    @property
-    def supported_extensions(self) -> list[str]:
-        return [".txt", ".md"]
+    extensions: frozenset[str] = frozenset({".txt", ".md"})
 
-    def extract(self, path: Path) -> ExtractedDocument:
-        stat = path.stat()
-        content = path.read_text(encoding="utf-8")
+    def can_handle(self, path: Path) -> bool:
+        return path.suffix.lower() in self.extensions
 
-        language: str | None
+    def extract(self, path: Path) -> ExtractedDocument | None:
         try:
-            language = detect(content)
+            stat = path.stat()
+            text = path.read_text(encoding="utf-8")
+        except Exception:
+            logger.warning("Failed to read %s", path, exc_info=True)
+            return None
+
+        language: str | None = None
+        try:
+            language = detect(text[:2000])
         except LangDetectException:
             logger.debug("Language detection failed for %s", path)
-            language = None
 
         return ExtractedDocument(
             path=path,
-            content=content,
-            language=language,
-            metadata=FileMetadata(
+            text=text,
+            metadata=DocumentMetadata(
                 size_bytes=stat.st_size,
                 mtime=stat.st_mtime,
-                extension=path.suffix,
+                ctime=stat.st_ctime,
+                language=language,
             ),
         )
