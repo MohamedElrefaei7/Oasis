@@ -3,12 +3,14 @@ from pathlib import Path
 from oasis.extractors.base import Extractor
 from oasis.extractors.docx import DocxExtractor
 from oasis.extractors.pdf import PdfExtractor
+from oasis.extractors.pptx import PptxExtractor
 from oasis.extractors.text import TextExtractor
 
 _EXTRACTORS: list[Extractor] = [
     TextExtractor(),
     PdfExtractor(),
     DocxExtractor(),
+    PptxExtractor(),
 ]
 
 

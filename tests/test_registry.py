@@ -2,6 +2,7 @@ from pathlib import Path
 
 from oasis.extractors.docx import DocxExtractor
 from oasis.extractors.pdf import PdfExtractor
+from oasis.extractors.pptx import PptxExtractor
 from oasis.extractors.registry import get_extractor
 from oasis.extractors.text import TextExtractor
 
@@ -24,8 +25,8 @@ class TestGetExtractor:
     def test_xlsx_returns_none(self) -> None:
         assert get_extractor(Path("data.xlsx")) is None
 
-    def test_pptx_returns_none(self) -> None:
-        assert get_extractor(Path("slides.pptx")) is None
+    def test_pptx_returns_pptx_extractor(self) -> None:
+        assert isinstance(get_extractor(Path("slides.pptx")), PptxExtractor)
 
     def test_unknown_extension_returns_none(self) -> None:
         assert get_extractor(Path("file.xyz")) is None
@@ -65,6 +66,14 @@ class TestGetExtractor:
 
     def test_round_trip_docx(self) -> None:
         path = FIXTURES / "sample.docx"
+        extractor = get_extractor(path)
+        assert extractor is not None
+        doc = extractor.extract(path)
+        assert doc is not None
+        assert len(doc.text) > 0
+
+    def test_round_trip_pptx(self) -> None:
+        path = FIXTURES / "sample.pptx"
         extractor = get_extractor(path)
         assert extractor is not None
         doc = extractor.extract(path)

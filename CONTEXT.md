@@ -25,6 +25,7 @@ src/oasis/
 │   ├── base.py
 │   ├── docx.py
 │   ├── pdf.py
+│   ├── pptx.py
 │   ├── registry.py
 │   └── text.py
 ├── index/
@@ -38,10 +39,12 @@ tests/
 │   ├── sample.docx
 │   ├── sample.md
 │   ├── sample.pdf
+│   ├── sample.pptx
 │   └── sample.txt
 ├── test_docx_extractor.py
 ├── test_extractors.py
 ├── test_pdf_extractor.py
+├── test_pptx_extractor.py
 └── test_registry.py
 ```
 
@@ -87,18 +90,30 @@ class Extractor(Protocol):
 - Captures `size_bytes`, `mtime`, `ctime`.
 - `page_count` not available from python-docx — left `None`.
 
+#### PPTX extractor — `src/oasis/extractors/pptx.py`
+- Handles `.pptx`.
+- Opens with `python-pptx`; broad exception on open → `None` + warning.
+- Iterates slides → shapes → text frames → paragraphs; per-shape exceptions caught individually and logged at DEBUG so one broken shape doesn't kill the slide.
+- Filters blank paragraphs before joining with `\n`.
+- Captures `title`, `author` from `core_properties`; empty string coerced to `None`.
+- Uses `page_count` to store slide count (reusing the same field as PDF page count).
+- `language` not detected — left `None` (same as DOCX).
+- Captures `size_bytes`, `mtime`, `ctime`.
+
 #### Test fixtures — `tests/fixtures/`
 - `sample.txt`, `sample.md` — plain text, English.
 - `sample.pdf` — minimal text-native single-page PDF generated with raw bytes; pypdf extracts text and `/Title` metadata from it.
-- `sample.docx` — created with python-docx; has `title="Sample Document"`, `author="Test Author"`, three paragraphs.
+- `sample.docx` — created with python-docx; `title="Sample Document"`, `author="Test Author"`, three paragraphs.
+- `sample.pptx` — created with python-pptx; two slides, `title="Sample Presentation"`, `author="Test Author"`.
 
-#### Tests — 67 total, all passing
+#### Tests — 87 total, all passing
 | File | Count | Covers |
 |---|---|---|
 | `test_extractors.py` | 22 | `TextExtractor` interface, `.txt`, `.md` |
 | `test_pdf_extractor.py` | 16 | `PdfExtractor` interface, success path, corrupted/scanned/missing file |
 | `test_docx_extractor.py` | 16 | `DocxExtractor` interface, success path, corrupted/missing file |
-| `test_registry.py` | 13 | Dispatch for all registered types, `None` for unregistered, round-trips |
+| `test_pptx_extractor.py` | 19 | `PptxExtractor` interface, success path (all slides, slide count, metadata), corrupted/missing file |
+| `test_registry.py` | 14 | Dispatch for all registered types, `None` for unregistered, round-trips for all four formats |
 
 ---
 
@@ -121,6 +136,4 @@ class Extractor(Protocol):
 ## Up Next
 
 - `src/oasis/extractors/xlsx.py` — Excel extractor using `openpyxl`
-- `src/oasis/extractors/pptx.py` — PowerPoint extractor using `python-pptx`
-- Register each new extractor in `registry.py` as it's completed
 - `src/oasis/index/` — SQLite + FTS5 indexing pipeline, change detection
