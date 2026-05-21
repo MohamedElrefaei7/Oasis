@@ -16,10 +16,11 @@ Running log of decisions, current state, and what's next. Updated with every cha
 #### Package structure
 ```
 src/oasis/
-├── __init__.py
+├── __init__.py          ← exports main() for pyproject.toml entry point
 ├── models.py
 ├── cli/
-│   └── __init__.py
+│   ├── __init__.py
+│   └── main.py
 ├── extractors/
 │   ├── __init__.py
 │   ├── base.py
@@ -29,9 +30,13 @@ src/oasis/
 │   ├── registry.py
 │   └── text.py
 ├── index/
-│   └── __init__.py
+│   ├── __init__.py
+│   ├── db.py
+│   ├── pipeline.py
+│   └── store.py
 └── query/
-    └── __init__.py
+    ├── __init__.py
+    └── search.py
 
 tests/
 ├── __init__.py
@@ -115,6 +120,40 @@ class Extractor(Protocol):
 | `test_pptx_extractor.py` | 19 | `PptxExtractor` interface, success path (all slides, slide count, metadata), corrupted/missing file |
 | `test_registry.py` | 14 | Dispatch for all registered types, `None` for unregistered, round-trips for all four formats |
 
+#### Index layer — `src/oasis/index/`
+
+**`db.py`** — `open_db(db_path) -> sqlite3.Connection`: creates the directory if needed, sets `journal_mode=WAL` and `synchronous=NORMAL`, then runs the schema script. The schema adds `title TEXT` and `content TEXT` to `documents` (required by `content=documents` — FTS5 fetches those columns from the base table by rowid). Three triggers keep FTS in sync: `_ai` (after insert), `_ad` (after delete), `_au` (after update — deletes old entry then inserts new).
+
+**`keyword.py`** — `KeywordIndex` class. All SQL in the index layer lives here and nowhere else.
+- `upsert(doc)` — SHA-256 content hash (16 hex chars), `INSERT … ON CONFLICT DO UPDATE` (fires the UPDATE trigger, keeping FTS in sync).
+- `delete(path)` — `DELETE FROM documents WHERE path = ?`; the `documents_ad` trigger removes the FTS row automatically.
+- `search(query, limit) -> list[Result]` — FTS5 `MATCH` joined to `documents`. Uses `snippet(…, char(2), char(3), …)` to avoid *any* string interpolation — SQLite's `char()` produces the sentinel chars from integer literals, so the SQL is fully parameterized. Raises `sqlite3.OperationalError` on bad FTS5 syntax.
+- `count() -> int` — `SELECT COUNT(*) FROM documents`.
+- `is_unchanged(path, mtime) -> bool` — single-row mtime lookup, used by pipeline for skip logic.
+- `Result` dataclass: `path`, `title`, `snippet`, `rank`.
+- `MATCH_START = "\x02"`, `MATCH_END = "\x03"` — match highlight sentinels (match `char(2)`/`char(3)` in SQL).
+
+**`store.py`** — gutted of SQL; thin re-export stub only. All callers now use `KeywordIndex`.
+
+**`pipeline.py`** — `index_directory(conn, root, *, force, on_file) -> dict[str, int]`. Instantiates `KeywordIndex(conn)` internally; calls `idx.is_unchanged()` and `idx.upsert()`. Returns `{indexed, skipped, failed, unsupported}`. `on_file` callback decouples progress display from pipeline logic.
+
+#### Query layer — `src/oasis/query/search.py`
+Gutted of SQL; re-exports `Result as SearchResult`, `MATCH_START`, `MATCH_END` from `keyword.py` for backward compatibility.
+
+#### CLI — `src/oasis/cli/main.py` + `src/oasis/__init__.py`
+Entry point: `oasis = "oasis:main"` in `pyproject.toml` → `__init__.py` → `app()`.
+
+**`oasis index <path>`**
+- `--db PATH` (default: `~/.oasis/index.db`)
+- `--force / -f` — re-index all files, ignoring mtime
+- Rich spinner shows current file name while running; final summary shows indexed/skipped/failed/unsupported counts.
+
+**`oasis search <query>`**
+- `--db PATH`, `--limit / -n` (default 20)
+- FTS5 query with porter stemming ("extracting" matches "extracts")
+- Rich Table: File (relative to cwd if possible), Title, Snippet with bold-yellow match highlights
+- Friendly error if DB doesn't exist; catches `OperationalError` for bad FTS5 syntax
+
 ---
 
 ## Key Decisions
@@ -130,10 +169,18 @@ class Extractor(Protocol):
 | Language detection runs on `text[:2000]` | Avoids processing entire large files; first 2000 chars is sufficient |
 | PDF per-page exceptions caught individually | One corrupted page shouldn't discard the rest of the document |
 | Scanned PDFs return `None`, not `ExtractedDocument` with empty text | Empty text is useless to the indexer; OCR is deferred |
+| `documents` table has `title` and `content` columns even though not in the original spec | `content=documents` in FTS5 requires those columns to exist in the base table; FTS fetches them by rowid |
+| FTS match markers use `\x02`/`\x03` (non-printable) not `[`/`]` | Rich uses `[...]` for markup — printable bracket markers would corrupt the display |
+| `is_unchanged` checks mtime only, not hash | Avoids reading the file just to skip it; hash is stored for future use |
+| `on_file` callback instead of embedding Rich in pipeline | Keeps pipeline testable and decoupled from display concerns |
+| `INSERT ... ON CONFLICT DO UPDATE` for upsert | Fires UPDATE trigger (not DELETE+INSERT), so FTS sync is correct for modified files |
+| All SQL consolidated in `KeywordIndex` | Single place to audit for injection; parameterized queries enforced by convention at class boundary |
+| `snippet(…, char(2), char(3), …)` instead of f-string | Eliminates the last string interpolation in SQL — sentinel chars produced by SQLite integer literals, not Python string formatting |
 
 ---
 
 ## Up Next
 
 - `src/oasis/extractors/xlsx.py` — Excel extractor using `openpyxl`
-- `src/oasis/index/` — SQLite + FTS5 indexing pipeline, change detection
+- `oasis index` — filter out hidden dirs (`.git`, `__pycache__`) using pathspec
+- Vector index layer — LanceDB + sentence-transformers for semantic search
