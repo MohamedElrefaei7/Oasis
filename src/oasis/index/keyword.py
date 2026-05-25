@@ -7,6 +7,10 @@ from pathlib import Path
 
 from oasis.models import ExtractedDocument
 
+
+def _file_hash(size: int | None, mtime: float | None) -> str:
+    return hashlib.sha256(f"{size}:{mtime}".encode()).hexdigest()[:16]
+
 # Non-printable sentinels passed to snippet() via SQLite's char() function.
 # char(2)/char(3) in the SQL avoids any string interpolation in the query.
 # They cannot appear in document text and don't conflict with Rich's [...] markup.
@@ -34,7 +38,7 @@ class KeywordIndex:
 
     def upsert(self, doc: ExtractedDocument) -> None:
         m = doc.metadata
-        content_hash = hashlib.sha256(doc.text.encode()).hexdigest()[:16]
+        content_hash = _file_hash(m.size_bytes, m.mtime)
         self._conn.execute(
             """
             INSERT INTO documents
@@ -116,9 +120,9 @@ class KeywordIndex:
     # Internal helpers (used by the pipeline)
     # ------------------------------------------------------------------
 
-    def is_unchanged(self, path: Path, mtime: float) -> bool:
+    def is_unchanged(self, path: Path, *, size: int, mtime: float) -> bool:
         row = self._conn.execute(
-            "SELECT mtime FROM documents WHERE path = ?",
+            "SELECT content_hash FROM documents WHERE path = ?",
             (str(path),),
         ).fetchone()
-        return row is not None and row["mtime"] == mtime
+        return row is not None and row["content_hash"] == _file_hash(size, mtime)

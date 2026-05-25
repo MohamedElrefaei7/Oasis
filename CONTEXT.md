@@ -125,17 +125,25 @@ class Extractor(Protocol):
 **`db.py`** — `open_db(db_path) -> sqlite3.Connection`: creates the directory if needed, sets `journal_mode=WAL` and `synchronous=NORMAL`, then runs the schema script. The schema adds `title TEXT` and `content TEXT` to `documents` (required by `content=documents` — FTS5 fetches those columns from the base table by rowid). Three triggers keep FTS in sync: `_ai` (after insert), `_ad` (after delete), `_au` (after update — deletes old entry then inserts new).
 
 **`keyword.py`** — `KeywordIndex` class. All SQL in the index layer lives here and nowhere else.
-- `upsert(doc)` — SHA-256 content hash (16 hex chars), `INSERT … ON CONFLICT DO UPDATE` (fires the UPDATE trigger, keeping FTS in sync).
+- `_file_hash(size, mtime) -> str` — module-level helper; SHA-256 of `"{size}:{mtime}"`, truncated to 16 hex chars. Used by both `upsert` and `is_unchanged`.
+- `upsert(doc)` — stores `_file_hash(m.size_bytes, m.mtime)` as `content_hash`, `INSERT … ON CONFLICT DO UPDATE` (fires the UPDATE trigger, keeping FTS in sync).
 - `delete(path)` — `DELETE FROM documents WHERE path = ?`; the `documents_ad` trigger removes the FTS row automatically.
 - `search(query, limit) -> list[Result]` — FTS5 `MATCH` joined to `documents`. Uses `snippet(…, char(2), char(3), …)` to avoid *any* string interpolation — SQLite's `char()` produces the sentinel chars from integer literals, so the SQL is fully parameterized. Raises `sqlite3.OperationalError` on bad FTS5 syntax.
 - `count() -> int` — `SELECT COUNT(*) FROM documents`.
-- `is_unchanged(path, mtime) -> bool` — single-row mtime lookup, used by pipeline for skip logic.
+- `is_unchanged(path, *, size, mtime) -> bool` — computes `_file_hash(size, mtime)` and compares against stored `content_hash`; skips any file that hasn't changed since last index.
 - `Result` dataclass: `path`, `title`, `snippet`, `rank`.
 - `MATCH_START = "\x02"`, `MATCH_END = "\x03"` — match highlight sentinels (match `char(2)`/`char(3)` in SQL).
 
 **`store.py`** — gutted of SQL; thin re-export stub only. All callers now use `KeywordIndex`.
 
-**`pipeline.py`** — `index_directory(conn, root, *, force, on_file) -> dict[str, int]`. Instantiates `KeywordIndex(conn)` internally; calls `idx.is_unchanged()` and `idx.upsert()`. Returns `{indexed, skipped, failed, unsupported}`. `on_file` callback decouples progress display from pipeline logic.
+**`walker.py`** — `walk(root, *, extra_excludes, respect_gitignore, exclude_dotfiles) -> Generator[Path]`. Exclusion is layered cheapest-first:
+1. `_DIR_EXCLUDES` frozenset — O(1) name check, prunes `dirnames` in-place so `os.walk` never descends. Covers `.git`, `__pycache__`, `node_modules`, `.venv`, `venv`, `dist`, `build`, `target`, and a handful of tool caches.
+2. Dotfile/dotdir skip — `name.startswith(".")` guard when `exclude_dotfiles=True` (default).
+3. pathspec `gitignore` spec — `_DEFAULT_FILE_PATTERNS` (`.pyc`, `.DS_Store`, etc.) + `extra_excludes` + root-level `.gitignore`. Pattern style is `gitignore` (not the deprecated `gitwildmatch`).
+- `followlinks=False` — never follows symlinks, preventing infinite loops.
+- Nested `.gitignore` files are not yet loaded (only root-level).
+
+**`pipeline.py`** — `index_directory(conn, root, *, force, extra_excludes, on_file) -> dict[str, int]`. Uses `walk(root, extra_excludes=extra_excludes)` instead of `rglob`. No `is_file()` guard needed — walker yields only files. `extra_excludes` is forwarded so callers can inject additional patterns without touching the walker defaults. Calls `path.stat()` once per file and passes both `st.st_size` and `st.st_mtime` to `is_unchanged` — change detection is hash-of-(size,mtime), not raw mtime comparison.
 
 #### Query layer — `src/oasis/query/search.py`
 Gutted of SQL; re-exports `Result as SearchResult`, `MATCH_START`, `MATCH_END` from `keyword.py` for backward compatibility.
@@ -171,16 +179,32 @@ Entry point: `oasis = "oasis:main"` in `pyproject.toml` → `__init__.py` → `a
 | Scanned PDFs return `None`, not `ExtractedDocument` with empty text | Empty text is useless to the indexer; OCR is deferred |
 | `documents` table has `title` and `content` columns even though not in the original spec | `content=documents` in FTS5 requires those columns to exist in the base table; FTS fetches them by rowid |
 | FTS match markers use `\x02`/`\x03` (non-printable) not `[`/`]` | Rich uses `[...]` for markup — printable bracket markers would corrupt the display |
-| `is_unchanged` checks mtime only, not hash | Avoids reading the file just to skip it; hash is stored for future use |
+| `is_unchanged` compares hash-of-(size,mtime), not raw mtime | Detects size changes (e.g. file written at same second), still avoids reading file bytes; `_file_hash` is also used in `upsert` so skip logic and storage are always in sync |
 | `on_file` callback instead of embedding Rich in pipeline | Keeps pipeline testable and decoupled from display concerns |
 | `INSERT ... ON CONFLICT DO UPDATE` for upsert | Fires UPDATE trigger (not DELETE+INSERT), so FTS sync is correct for modified files |
 | All SQL consolidated in `KeywordIndex` | Single place to audit for injection; parameterized queries enforced by convention at class boundary |
 | `snippet(…, char(2), char(3), …)` instead of f-string | Eliminates the last string interpolation in SQL — sentinel chars produced by SQLite integer literals, not Python string formatting |
+| Walker uses `os.walk` + in-place `dirnames` pruning, not `Path.rglob` | `rglob` loads every path into memory; `os.walk` with pruning never descends into excluded dirs, saving both memory and I/O |
+| Exclusion is layered (set → dotfile → pathspec) | Set lookup is O(1); pathspec only runs after cheap guards pass, keeping the hot path fast |
+| `gitignore` pattern style instead of deprecated `gitwildmatch` | pathspec 0.12+ deprecates `gitwildmatch`; `gitignore` is the successor with identical semantics |
+
+---
+
+## Tests — 138 total, all passing
+| File | Count | Covers |
+|---|---|---|
+| `test_extractors.py` | 22 | `TextExtractor` |
+| `test_pdf_extractor.py` | 16 | `PdfExtractor` |
+| `test_docx_extractor.py` | 16 | `DocxExtractor` |
+| `test_pptx_extractor.py` | 19 | `PptxExtractor` |
+| `test_registry.py` | 14 | Registry dispatch + round-trips |
+| `test_walker.py` | 29 | Walker exclusions, dotfiles, gitignore, patterns, generator contract |
+| `test_keyword.py` | 22 | `_file_hash`, `is_unchanged` (new/after-upsert/changed-size/changed-mtime), `count`, `delete` (FTS removal), `search` (match, stemming, sentinels, limit, rank) |
 
 ---
 
 ## Up Next
 
 - `src/oasis/extractors/xlsx.py` — Excel extractor using `openpyxl`
-- `oasis index` — filter out hidden dirs (`.git`, `__pycache__`) using pathspec
+- Nested `.gitignore` support in walker (load per-directory, not just root)
 - Vector index layer — LanceDB + sentence-transformers for semantic search

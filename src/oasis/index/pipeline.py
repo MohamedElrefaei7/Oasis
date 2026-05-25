@@ -5,6 +5,7 @@ from typing import Callable
 
 from oasis.extractors.registry import get_extractor
 from oasis.index.keyword import KeywordIndex
+from oasis.index.walker import walk
 
 logger = logging.getLogger(__name__)
 
@@ -16,15 +17,13 @@ def index_directory(
     root: Path,
     *,
     force: bool = False,
+    extra_excludes: list[str] | None = None,
     on_file: OnFile | None = None,
 ) -> dict[str, int]:
     stats: dict[str, int] = {"indexed": 0, "skipped": 0, "failed": 0, "unsupported": 0}
     idx = KeywordIndex(conn)
 
-    for path in sorted(root.rglob("*")):
-        if not path.is_file():
-            continue
-
+    for path in walk(root, extra_excludes=extra_excludes):
         extractor = get_extractor(path)
         if extractor is None:
             stats["unsupported"] += 1
@@ -33,7 +32,7 @@ def index_directory(
             continue
 
         try:
-            current_mtime = path.stat().st_mtime
+            st = path.stat()
         except OSError:
             logger.warning("Cannot stat %s", path)
             stats["failed"] += 1
@@ -41,7 +40,7 @@ def index_directory(
                 on_file(path, "failed")
             continue
 
-        if not force and idx.is_unchanged(path, current_mtime):
+        if not force and idx.is_unchanged(path, size=st.st_size, mtime=st.st_mtime):
             stats["skipped"] += 1
             if on_file:
                 on_file(path, "skipped")
