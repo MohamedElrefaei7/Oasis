@@ -17,6 +17,7 @@ Running log of decisions, current state, and what's next. Updated with every cha
 ```
 src/oasis/
 ├── __init__.py          ← exports main() for pyproject.toml entry point
+├── config.py
 ├── models.py
 ├── cli/
 │   ├── __init__.py
@@ -46,9 +47,11 @@ tests/
 │   ├── sample.pdf
 │   ├── sample.pptx
 │   └── sample.txt
+├── test_config.py
 ├── test_docx_extractor.py
 ├── test_extractors.py
 ├── test_pdf_extractor.py
+├── test_pipeline.py
 ├── test_pptx_extractor.py
 └── test_registry.py
 ```
@@ -120,6 +123,19 @@ class Extractor(Protocol):
 | `test_pptx_extractor.py` | 19 | `PptxExtractor` interface, success path (all slides, slide count, metadata), corrupted/missing file |
 | `test_registry.py` | 14 | Dispatch for all registered types, `None` for unregistered, round-trips for all four formats |
 
+#### Config — `src/oasis/config.py`
+- `CONFIG_PATH: Path` — module-level constant pointing to `~/.config/oasis/config.toml`. Defined at module scope (not inside the class) so tests can `monkeypatch.setattr(config_module, "CONFIG_PATH", ...)` before constructing `OasisConfig()`.
+- `OasisConfig(BaseSettings)` — pydantic-settings class with `env_prefix="OASIS_"`.
+  - `index_paths: list[Path]` — directories to index; default `[]`.
+  - `exclude_patterns: list[str]` — extra gitignore patterns passed to the walker; default `[]`.
+  - `db_path: Path` — SQLite database; default `~/.oasis/index.db`.
+  - `vector_path: Path` — LanceDB data directory; default `~/.oasis/vectors.lance`.
+  - `embedding_model: str` — sentence-transformers model; default `"all-MiniLM-L6-v2"`.
+  - `llm_provider: str` — `"anthropic"` or `"ollama"`; default `"anthropic"`.
+- `settings_customise_sources` — priority: init kwargs > `OASIS_*` env vars > TOML file > field defaults. Reads `CONFIG_PATH` at construction time so monkeypatching works.
+- `load_config() -> OasisConfig` — convenience wrapper; just calls `OasisConfig()`.
+- A missing or empty TOML file is handled gracefully (returns defaults).
+
 #### Index layer — `src/oasis/index/`
 
 **`db.py`** — `open_db(db_path) -> sqlite3.Connection`: creates the directory if needed, sets `journal_mode=WAL` and `synchronous=NORMAL`, then runs the schema script. The schema adds `title TEXT` and `content TEXT` to `documents` (required by `content=documents` — FTS5 fetches those columns from the base table by rowid). Three triggers keep FTS in sync: `_ai` (after insert), `_ad` (after delete), `_au` (after update — deletes old entry then inserts new).
@@ -143,7 +159,7 @@ class Extractor(Protocol):
 - `followlinks=False` — never follows symlinks, preventing infinite loops.
 - Nested `.gitignore` files are not yet loaded (only root-level).
 
-**`pipeline.py`** — `index_directory(conn, root, *, force, extra_excludes, on_file) -> dict[str, int]`. Uses `walk(root, extra_excludes=extra_excludes)` instead of `rglob`. No `is_file()` guard needed — walker yields only files. `extra_excludes` is forwarded so callers can inject additional patterns without touching the walker defaults. Calls `path.stat()` once per file and passes both `st.st_size` and `st.st_mtime` to `is_unchanged` — change detection is hash-of-(size,mtime), not raw mtime comparison.
+**`pipeline.py`** — `index_directory(conn, root, *, force, extra_excludes, on_file) -> dict[str, int]`. Uses `walk(root, extra_excludes=extra_excludes)` instead of `rglob`. No `is_file()` guard needed — walker yields only files. `extra_excludes` is forwarded so callers can inject additional patterns without touching the walker defaults. Calls `path.stat()` once per file and passes both `st.st_size` and `st.st_mtime` to `is_unchanged` — change detection is hash-of-(size,mtime), not raw mtime comparison. `extractor.extract()` and `idx.upsert()` are each wrapped in `try/except Exception` — any unexpected raise increments `failed` and continues; the run is never aborted by a single bad file.
 
 #### Query layer — `src/oasis/query/search.py`
 Gutted of SQL; re-exports `Result as SearchResult`, `MATCH_START`, `MATCH_END` from `keyword.py` for backward compatibility.
@@ -181,6 +197,10 @@ Entry point: `oasis = "oasis:main"` in `pyproject.toml` → `__init__.py` → `a
 | FTS match markers use `\x02`/`\x03` (non-printable) not `[`/`]` | Rich uses `[...]` for markup — printable bracket markers would corrupt the display |
 | `is_unchanged` compares hash-of-(size,mtime), not raw mtime | Detects size changes (e.g. file written at same second), still avoids reading file bytes; `_file_hash` is also used in `upsert` so skip logic and storage are always in sync |
 | `on_file` callback instead of embedding Rich in pipeline | Keeps pipeline testable and decoupled from display concerns |
+| `try/except Exception` around `extract()` and `upsert()` in pipeline | Extractor protocol says return None on failure, but defensive wrapping ensures any unexpected raise is caught, logged, and counted as failed — the run never aborts |
+| Pipeline test DB placed in a dotdir (`.db/`) inside `tmp_path` | Walker excludes dotdirs by default, so the DB files don't appear as unsupported files in pipeline tests |
+| `CONFIG_PATH` is a module-level constant, not embedded in the class | `settings_customise_sources` reads it at construction time, so `monkeypatch.setattr(config_module, "CONFIG_PATH", ...)` works in tests without subclassing |
+| Priority: init kwargs > env vars > TOML > defaults | Env vars are the standard override mechanism; TOML is the persistent user config; init kwargs allow programmatic override in tests |
 | `INSERT ... ON CONFLICT DO UPDATE` for upsert | Fires UPDATE trigger (not DELETE+INSERT), so FTS sync is correct for modified files |
 | All SQL consolidated in `KeywordIndex` | Single place to audit for injection; parameterized queries enforced by convention at class boundary |
 | `snippet(…, char(2), char(3), …)` instead of f-string | Eliminates the last string interpolation in SQL — sentinel chars produced by SQLite integer literals, not Python string formatting |
@@ -190,7 +210,7 @@ Entry point: `oasis = "oasis:main"` in `pyproject.toml` → `__init__.py` → `a
 
 ---
 
-## Tests — 138 total, all passing
+## Tests — 178 total, all passing
 | File | Count | Covers |
 |---|---|---|
 | `test_extractors.py` | 22 | `TextExtractor` |
@@ -200,11 +220,12 @@ Entry point: `oasis = "oasis:main"` in `pyproject.toml` → `__init__.py` → `a
 | `test_registry.py` | 14 | Registry dispatch + round-trips |
 | `test_walker.py` | 29 | Walker exclusions, dotfiles, gitignore, patterns, generator contract |
 | `test_keyword.py` | 22 | `_file_hash`, `is_unchanged` (new/after-upsert/changed-size/changed-mtime), `count`, `delete` (FTS removal), `search` (match, stemming, sentinels, limit, rank) |
+| `test_pipeline.py` | 18 | All stat branches (indexed/skipped/failed/unsupported), force flag, `on_file` callback, extractor returning None, extractor raising, upsert raising, one failure doesn't stop others |
+| `test_config.py` | 22 | `CONFIG_PATH`, all six field defaults, TOML loading per field, missing/empty TOML, env var overrides (wins over TOML and defaults), unprefixed env vars ignored, `load_config()` |
 
 ---
 
 ## Up Next
 
-- `src/oasis/extractors/xlsx.py` — Excel extractor using `openpyxl`
 - Nested `.gitignore` support in walker (load per-directory, not just root)
 - Vector index layer — LanceDB + sentence-transformers for semantic search

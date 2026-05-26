@@ -46,14 +46,30 @@ def index_directory(
                 on_file(path, "skipped")
             continue
 
-        doc = extractor.extract(path)
+        try:
+            doc = extractor.extract(path)
+        except Exception:
+            logger.warning("Unexpected error extracting %s", path, exc_info=True)
+            stats["failed"] += 1
+            if on_file:
+                on_file(path, "failed")
+            continue
+
         if doc is None:
             stats["failed"] += 1
             if on_file:
                 on_file(path, "failed")
             continue
 
-        idx.upsert(doc)
+        try:
+            idx.upsert(doc)
+        except Exception:
+            logger.warning("Failed to store %s", path, exc_info=True)
+            stats["failed"] += 1
+            if on_file:
+                on_file(path, "failed")
+            continue
+
         stats["indexed"] += 1
         if on_file:
             on_file(path, "indexed")
