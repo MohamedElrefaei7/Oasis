@@ -1,4 +1,4 @@
-from oasis.cli.main import app
+from oasis.cli.app import app
 
 
 def main() -> None:

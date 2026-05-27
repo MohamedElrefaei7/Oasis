@@ -116,6 +116,10 @@ class KeywordIndex:
         row = self._conn.execute("SELECT COUNT(*) FROM documents").fetchone()
         return row[0]
 
+    def last_indexed_at(self) -> float | None:
+        row = self._conn.execute("SELECT MAX(indexed_at) FROM documents").fetchone()
+        return row[0] if row and row[0] is not None else None
+
     # ------------------------------------------------------------------
     # Internal helpers (used by the pipeline)
     # ------------------------------------------------------------------

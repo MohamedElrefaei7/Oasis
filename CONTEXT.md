@@ -146,6 +146,7 @@ class Extractor(Protocol):
 - `delete(path)` — `DELETE FROM documents WHERE path = ?`; the `documents_ad` trigger removes the FTS row automatically.
 - `search(query, limit) -> list[Result]` — FTS5 `MATCH` joined to `documents`. Uses `snippet(…, char(2), char(3), …)` to avoid *any* string interpolation — SQLite's `char()` produces the sentinel chars from integer literals, so the SQL is fully parameterized. Raises `sqlite3.OperationalError` on bad FTS5 syntax.
 - `count() -> int` — `SELECT COUNT(*) FROM documents`.
+- `last_indexed_at() -> float | None` — `SELECT MAX(indexed_at) FROM documents`; used by `status` command.
 - `is_unchanged(path, *, size, mtime) -> bool` — computes `_file_hash(size, mtime)` and compares against stored `content_hash`; skips any file that hasn't changed since last index.
 - `Result` dataclass: `path`, `title`, `snippet`, `rank`.
 - `MATCH_START = "\x02"`, `MATCH_END = "\x03"` — match highlight sentinels (match `char(2)`/`char(3)` in SQL).
@@ -164,19 +165,30 @@ class Extractor(Protocol):
 #### Query layer — `src/oasis/query/search.py`
 Gutted of SQL; re-exports `Result as SearchResult`, `MATCH_START`, `MATCH_END` from `keyword.py` for backward compatibility.
 
-#### CLI — `src/oasis/cli/main.py` + `src/oasis/__init__.py`
-Entry point: `oasis = "oasis:main"` in `pyproject.toml` → `__init__.py` → `app()`.
+#### CLI — `src/oasis/cli/app.py` + `src/oasis/__init__.py`
+Entry point: `oasis = "oasis:main"` in `pyproject.toml` → `__init__.py` → `app()`. Default `db_path` comes from `load_config().db_path` (resolves to `~/.oasis/index.db` unless overridden by TOML or env var). `src/oasis/cli/main.py` is legacy and no longer wired up.
 
 **`oasis index <path>`**
-- `--db PATH` (default: `~/.oasis/index.db`)
-- `--force / -f` — re-index all files, ignoring mtime
-- Rich spinner shows current file name while running; final summary shows indexed/skipped/failed/unsupported counts.
+- `--db PATH` — default from config
+- `--force / -f` — re-index all files, ignoring change detection
+- `--verbose / -v` — print each file as it's processed (status label + full path); without flag, shows a transient Rich spinner with the current filename
+- Final summary: `N indexed  N skipped  N unsupported  N failed` (zero counts omitted)
 
 **`oasis search <query>`**
 - `--db PATH`, `--limit / -n` (default 20)
 - FTS5 query with porter stemming ("extracting" matches "extracts")
-- Rich Table: File (relative to cwd if possible), Title, Snippet with bold-yellow match highlights
-- Friendly error if DB doesn't exist; catches `OperationalError` for bad FTS5 syntax
+- Rich Table: `#` rank, File (relative to cwd if possible), Title, Snippet with bold-yellow match highlights
+- "No results." if empty; friendly error if DB doesn't exist; catches `OperationalError` for bad FTS5 syntax
+
+**`oasis status`**
+- `--db PATH`
+- Key/value table: Documents (count), DB size (human-readable), Last indexed (timestamp or `—`), DB path
+- Prints helpful message if no index exists yet
+
+**`oasis reset`**
+- `--db PATH`, `--yes / -y` — skip confirmation
+- Prompts for confirmation by default (`typer.confirm`, abort=True on decline)
+- Deletes the DB file plus WAL/SHM companions (`*.db-wal`, `*.db-shm`) if present
 
 ---
 
@@ -210,7 +222,7 @@ Entry point: `oasis = "oasis:main"` in `pyproject.toml` → `__init__.py` → `a
 
 ---
 
-## Tests — 178 total, all passing
+## Tests — 205 total, all passing
 | File | Count | Covers |
 |---|---|---|
 | `test_extractors.py` | 22 | `TextExtractor` |
@@ -222,6 +234,7 @@ Entry point: `oasis = "oasis:main"` in `pyproject.toml` → `__init__.py` → `a
 | `test_keyword.py` | 22 | `_file_hash`, `is_unchanged` (new/after-upsert/changed-size/changed-mtime), `count`, `delete` (FTS removal), `search` (match, stemming, sentinels, limit, rank) |
 | `test_pipeline.py` | 18 | All stat branches (indexed/skipped/failed/unsupported), force flag, `on_file` callback, extractor returning None, extractor raising, upsert raising, one failure doesn't stop others |
 | `test_config.py` | 22 | `CONFIG_PATH`, all six field defaults, TOML loading per field, missing/empty TOML, env var overrides (wins over TOML and defaults), unprefixed env vars ignored, `load_config()` |
+| `test_cli.py` | 27 | All four commands (index/search/status/reset), error paths, verbose flag, force flag, limit flag, confirmation prompt, WAL/SHM deletion |
 
 ---
 
