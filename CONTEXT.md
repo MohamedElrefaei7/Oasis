@@ -222,7 +222,7 @@ Entry point: `oasis = "oasis:main"` in `pyproject.toml` → `__init__.py` → `a
 
 ---
 
-## Tests — 205 total, all passing
+## Tests — 225 total, all passing
 | File | Count | Covers |
 |---|---|---|
 | `test_extractors.py` | 22 | `TextExtractor` |
@@ -235,6 +235,7 @@ Entry point: `oasis = "oasis:main"` in `pyproject.toml` → `__init__.py` → `a
 | `test_pipeline.py` | 18 | All stat branches (indexed/skipped/failed/unsupported), force flag, `on_file` callback, extractor returning None, extractor raising, upsert raising, one failure doesn't stop others |
 | `test_config.py` | 22 | `CONFIG_PATH`, all six field defaults, TOML loading per field, missing/empty TOML, env var overrides (wins over TOML and defaults), unprefixed env vars ignored, `load_config()` |
 | `test_cli.py` | 27 | All four commands (index/search/status/reset), error paths, verbose flag, force flag, limit flag, confirmation prompt, WAL/SHM deletion |
+| `test_integration.py` | 20 | End-to-end: real files → `index_directory` → `KeywordIndex.search`. Store/retrieve, path correctness, snippet sentinels, stemming, markdown, nested dirs, no duplicates; walker exclusions (named dirs, dotfiles, dotdirs, `.gitignore`, `extra_excludes`); incremental reindex (mtime change, size change, updated content replaces old, new file on second run, force flag) |
 
 ---
 
