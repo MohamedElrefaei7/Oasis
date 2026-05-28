@@ -177,8 +177,13 @@ Entry point: `oasis = "oasis:main"` in `pyproject.toml` → `__init__.py` → `a
 **`oasis search <query>`**
 - `--db PATH`, `--limit / -n` (default 20)
 - FTS5 query with porter stemming ("extracting" matches "extracts")
-- Rich Table: `#` rank, File (relative to cwd if possible), Title, Snippet with bold-yellow match highlights
+- Rich Table: `#` rank (bold, `min_width=2` so it survives narrow terminals), File (relative to cwd, clickable `file://` hyperlink), Title, Snippet with bold-yellow match highlights
+- After display, saves `[str(path), ...]` to `~/.oasis/last_results.json` for `oasis open`
 - "No results." if empty; friendly error if DB doesn't exist; catches `OperationalError` for bad FTS5 syntax
+
+**`oasis open <n>`**
+- Opens result `#n` from the last search in the system default application (`open` on macOS)
+- Reads `~/.oasis/last_results.json`; errors clearly if no recent search, `n` out of range, or file no longer exists
 
 **`oasis status`**
 - `--db PATH`
@@ -222,7 +227,7 @@ Entry point: `oasis = "oasis:main"` in `pyproject.toml` → `__init__.py` → `a
 
 ---
 
-## Tests — 225 total, all passing
+## Tests — 232 total, all passing
 | File | Count | Covers |
 |---|---|---|
 | `test_extractors.py` | 22 | `TextExtractor` |
@@ -234,7 +239,7 @@ Entry point: `oasis = "oasis:main"` in `pyproject.toml` → `__init__.py` → `a
 | `test_keyword.py` | 22 | `_file_hash`, `is_unchanged` (new/after-upsert/changed-size/changed-mtime), `count`, `delete` (FTS removal), `search` (match, stemming, sentinels, limit, rank) |
 | `test_pipeline.py` | 18 | All stat branches (indexed/skipped/failed/unsupported), force flag, `on_file` callback, extractor returning None, extractor raising, upsert raising, one failure doesn't stop others |
 | `test_config.py` | 22 | `CONFIG_PATH`, all six field defaults, TOML loading per field, missing/empty TOML, env var overrides (wins over TOML and defaults), unprefixed env vars ignored, `load_config()` |
-| `test_cli.py` | 27 | All four commands (index/search/status/reset), error paths, verbose flag, force flag, limit flag, confirmation prompt, WAL/SHM deletion |
+| `test_cli.py` | 34 | All five commands (index/search/status/reset/open), error paths, verbose/force/limit flags, confirmation prompt, `open` mocks `subprocess.run`, correct file selected by index, last-results persistence |
 | `test_integration.py` | 20 | End-to-end: real files → `index_directory` → `KeywordIndex.search`. Store/retrieve, path correctness, snippet sentinels, stemming, markdown, nested dirs, no duplicates; walker exclusions (named dirs, dotfiles, dotdirs, `.gitignore`, `extra_excludes`); incremental reindex (mtime change, size change, updated content replaces old, new file on second run, force flag) |
 
 ---

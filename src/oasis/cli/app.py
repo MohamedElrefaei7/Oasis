@@ -1,4 +1,6 @@
+import json
 import sqlite3
+import subprocess
 from datetime import datetime
 from pathlib import Path
 
@@ -21,6 +23,17 @@ app = typer.Typer(
 )
 _console = Console()
 _err = Console(stderr=True)
+
+# Persists the file paths from the most recent search so `oasis open N` works.
+_LAST_RESULTS_PATH: Path = Path.home() / ".oasis" / "last_results.json"
+
+
+def _save_last_results(paths: list[Path]) -> None:
+    try:
+        _LAST_RESULTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _LAST_RESULTS_PATH.write_text(json.dumps([str(p) for p in paths]))
+    except OSError:
+        pass  # Never let a cache write break the search output
 
 
 def _db_path(override: Path | None) -> Path:
@@ -144,7 +157,7 @@ def cmd_search(
 
     cwd = Path.cwd()
     table = Table(box=None, show_header=True, header_style="bold dim", padding=(0, 2))
-    table.add_column("#", style="dim", justify="right", no_wrap=True)
+    table.add_column("#", style="bold", justify="right", no_wrap=True, min_width=2)
     table.add_column("File", style="cyan", no_wrap=True)
     table.add_column("Title")
     table.add_column("Snippet")
@@ -154,10 +167,12 @@ def cmd_search(
             display = r.path.relative_to(cwd)
         except ValueError:
             display = r.path
-        table.add_row(str(i), str(display), r.title or "", _highlight_snippet(r.snippet))
+        file_link = Text(str(display), style=f"cyan link {r.path.resolve().as_uri()}")
+        table.add_row(str(i), file_link, r.title or "", _highlight_snippet(r.snippet))
 
     _console.print(table)
     _console.print(f"\n[dim]{len(results)} result(s)  ·  db: {db_path}[/dim]")
+    _save_last_results([r.path for r in results])
 
 
 # ---------------------------------------------------------------------------
@@ -224,3 +239,36 @@ def reset(
             companion.unlink()
 
     _console.print(f"[green]Deleted:[/green] {db_path}")
+
+
+# ---------------------------------------------------------------------------
+# open
+# ---------------------------------------------------------------------------
+
+@app.command(name="open")
+def cmd_open(
+    n: int = typer.Argument(..., help="Result number from the last search"),
+) -> None:
+    """Open a search result in the system default application."""
+    if not _LAST_RESULTS_PATH.exists():
+        _err.print("[red]No recent search.[/red] Run [bold]oasis search <query>[/bold] first.")
+        raise typer.Exit(1)
+
+    try:
+        paths = json.loads(_LAST_RESULTS_PATH.read_text())
+    except (OSError, json.JSONDecodeError):
+        _err.print("[red]Could not read last search results — try searching again.[/red]")
+        raise typer.Exit(1)
+
+    if not 1 <= n <= len(paths):
+        _err.print(f"[red]No result #{n}.[/red] Last search returned {len(paths)} result(s).")
+        raise typer.Exit(1)
+
+    path = Path(paths[n - 1])
+
+    if not path.exists():
+        _err.print(f"[red]File no longer exists:[/red] {path}")
+        raise typer.Exit(1)
+
+    subprocess.run(["open", str(path)], check=False)
+    _console.print(f"[dim]Opening {path.name}[/dim]")

@@ -1,9 +1,12 @@
+import json
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from typer.testing import CliRunner
 
-from oasis.cli.app import app
+import oasis.cli.app as app_module
+from oasis.cli.app import app, _LAST_RESULTS_PATH
 from oasis.index.db import open_db
 
 runner = CliRunner()
@@ -230,3 +233,81 @@ def test_reset_without_yes_prompts(tmp_path: Path) -> None:
     # Decline the confirmation — db should remain
     result = runner.invoke(app, ["reset", "--db", str(db)], input="n\n")
     assert db.exists()
+
+
+# ---------------------------------------------------------------------------
+# open
+# ---------------------------------------------------------------------------
+
+
+def _write_last_results(paths: list[Path], monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point _LAST_RESULTS_PATH at a temp file and populate it."""
+    fake = paths[0].parent / ".last_results.json"
+    fake.write_text(json.dumps([str(p) for p in paths]))
+    monkeypatch.setattr(app_module, "_LAST_RESULTS_PATH", fake)
+
+
+def test_open_no_last_search_exits_1(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(app_module, "_LAST_RESULTS_PATH", tmp_path / "missing.json")
+    result = runner.invoke(app, ["open", "1"])
+    assert result.exit_code == 1
+    assert "No recent search" in result.output
+
+
+def test_open_n_out_of_range_exits_1(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    f = tmp_path / "doc.txt"
+    f.write_text("hi")
+    _write_last_results([f], monkeypatch)
+    result = runner.invoke(app, ["open", "5"])
+    assert result.exit_code == 1
+    assert "No result #5" in result.output
+
+
+def test_open_missing_file_exits_1(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    ghost = tmp_path / "ghost.txt"  # never created
+    _write_last_results([ghost], monkeypatch)
+    result = runner.invoke(app, ["open", "1"])
+    assert result.exit_code == 1
+    assert "no longer exists" in result.output
+
+
+def test_open_calls_system_open(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    f = tmp_path / "doc.txt"
+    f.write_text("content")
+    _write_last_results([f], monkeypatch)
+    with patch("oasis.cli.app.subprocess.run") as mock_run:
+        result = runner.invoke(app, ["open", "1"])
+    assert result.exit_code == 0
+    mock_run.assert_called_once_with(["open", str(f)], check=False)
+
+
+def test_open_correct_file_selected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    files = [tmp_path / f"doc{i}.txt" for i in range(1, 4)]
+    for f in files:
+        f.write_text("hi")
+    _write_last_results(files, monkeypatch)
+    with patch("oasis.cli.app.subprocess.run") as mock_run:
+        runner.invoke(app, ["open", "2"])
+    mock_run.assert_called_once_with(["open", str(files[1])], check=False)
+
+
+def test_open_prints_filename(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    f = tmp_path / "report.txt"
+    f.write_text("content")
+    _write_last_results([f], monkeypatch)
+    with patch("oasis.cli.app.subprocess.run"):
+        result = runner.invoke(app, ["open", "1"])
+    assert "report.txt" in result.output
+
+
+def test_search_saves_last_results(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    db = _db(tmp_path)
+    fake_results = tmp_path / ".last_results.json"
+    monkeypatch.setattr(app_module, "_LAST_RESULTS_PATH", fake_results)
+    (tmp_path / "doc.txt").write_text("unique searchable content")
+    runner.invoke(app, ["index", str(tmp_path), "--db", str(db)])
+    runner.invoke(app, ["search", "unique", "--db", str(db)])
+    assert fake_results.exists()
+    paths = json.loads(fake_results.read_text())
+    assert len(paths) == 1
+    assert paths[0].endswith("doc.txt")
