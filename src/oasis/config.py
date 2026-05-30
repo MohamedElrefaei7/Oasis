@@ -1,6 +1,5 @@
 from pathlib import Path
 
-from pydantic import Field
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -17,12 +16,7 @@ class OasisConfig(BaseSettings):
         env_prefix="OASIS_",
     )
 
-    index_paths: list[Path] = Field(default_factory=list)
-    exclude_patterns: list[str] = Field(default_factory=list)
     db_path: Path = Path.home() / ".oasis" / "index.db"
-    vector_path: Path = Path.home() / ".oasis" / "vectors.lance"
-    embedding_model: str = "all-MiniLM-L6-v2"
-    llm_provider: str = "anthropic"
 
     @classmethod
     def settings_customise_sources(

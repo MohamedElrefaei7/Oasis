@@ -11,9 +11,6 @@ logger = logging.getLogger(__name__)
 class PdfExtractor:
     extensions: frozenset[str] = frozenset({".pdf"})
 
-    def can_handle(self, path: Path) -> bool:
-        return path.suffix.lower() in self.extensions
-
     def extract(self, path: Path) -> ExtractedDocument | None:
         try:
             reader = PdfReader(path)

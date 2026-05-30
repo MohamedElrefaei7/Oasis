@@ -2,7 +2,6 @@ import logging
 from pathlib import Path
 
 from pptx import Presentation
-from pptx.exc import PackageNotFoundError
 
 from oasis.models import DocumentMetadata, ExtractedDocument
 
@@ -12,13 +11,10 @@ logger = logging.getLogger(__name__)
 class PptxExtractor:
     extensions: frozenset[str] = frozenset({".pptx"})
 
-    def can_handle(self, path: Path) -> bool:
-        return path.suffix.lower() in self.extensions
-
     def extract(self, path: Path) -> ExtractedDocument | None:
         try:
             prs = Presentation(str(path))
-        except (PackageNotFoundError, Exception):
+        except Exception:
             logger.warning("Failed to open PPTX %s", path, exc_info=True)
             return None
 

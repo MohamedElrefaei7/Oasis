@@ -6,16 +6,12 @@ from oasis.extractors.pdf import PdfExtractor
 from oasis.extractors.pptx import PptxExtractor
 from oasis.extractors.text import TextExtractor
 
-_EXTRACTORS: list[Extractor] = [
-    TextExtractor(),
-    PdfExtractor(),
-    DocxExtractor(),
-    PptxExtractor(),
-]
+_EXTRACTOR_MAP: dict[str, Extractor] = {
+    ext: instance
+    for instance in (TextExtractor(), PdfExtractor(), DocxExtractor(), PptxExtractor())
+    for ext in instance.extensions
+}
 
 
 def get_extractor(path: Path) -> Extractor | None:
-    for extractor in _EXTRACTORS:
-        if extractor.can_handle(path):
-            return extractor
-    return None
+    return _EXTRACTOR_MAP.get(path.suffix.lower())

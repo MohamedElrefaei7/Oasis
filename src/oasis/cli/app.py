@@ -41,11 +41,12 @@ def _db_path(override: Path | None) -> Path:
 
 
 def _human_size(n: int) -> str:
+    size: float = n
     for unit in ("B", "KB", "MB", "GB"):
-        if n < 1024:
-            return f"{n} {unit}" if unit == "B" else f"{n:.1f} {unit}"
-        n /= 1024  # type: ignore[assignment]
-    return f"{n:.1f} TB"
+        if size < 1024:
+            return f"{int(size)} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
 
 
 def _highlight_snippet(raw: str) -> Text:

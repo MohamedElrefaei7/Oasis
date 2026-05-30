@@ -21,7 +21,7 @@ src/oasis/
 ├── models.py
 ├── cli/
 │   ├── __init__.py
-│   └── main.py
+│   └── app.py
 ├── extractors/
 │   ├── __init__.py
 │   ├── base.py
@@ -30,14 +30,12 @@ src/oasis/
 │   ├── pptx.py
 │   ├── registry.py
 │   └── text.py
-├── index/
-│   ├── __init__.py
-│   ├── db.py
-│   ├── pipeline.py
-│   └── store.py
-└── query/
+└── index/
     ├── __init__.py
-    └── search.py
+    ├── db.py
+    ├── keyword.py
+    ├── pipeline.py
+    └── walker.py
 
 tests/
 ├── __init__.py
@@ -64,16 +62,15 @@ tests/
 ```python
 class Extractor(Protocol):
     extensions: frozenset[str]
-    def can_handle(self, path: Path) -> bool: ...
     def extract(self, path: Path) -> ExtractedDocument | None: ...
 ```
 - `extract` returns `None` on failure rather than raising — callers can skip bad files and continue.
 - `extensions` is a class-level `frozenset`, not a property.
 
 #### Extractor registry — `src/oasis/extractors/registry.py`
-- `_EXTRACTORS: list[Extractor]` — ordered list of registered extractor instances.
-- `get_extractor(path) -> Extractor | None` — iterates the list and returns the first where `can_handle(path)` is `True`.
-- To add a new extractor: instantiate it and append to `_EXTRACTORS`.
+- `_EXTRACTOR_MAP: dict[str, Extractor]` — built at import time from each extractor's `extensions` frozenset.
+- `get_extractor(path) -> Extractor | None` — O(1) dict lookup on `path.suffix.lower()`.
+- To add a new extractor: instantiate it inside the dict comprehension.
 
 #### Text extractor — `src/oasis/extractors/text.py`
 - Handles `.txt`, `.md`.
@@ -126,15 +123,11 @@ class Extractor(Protocol):
 #### Config — `src/oasis/config.py`
 - `CONFIG_PATH: Path` — module-level constant pointing to `~/.config/oasis/config.toml`. Defined at module scope (not inside the class) so tests can `monkeypatch.setattr(config_module, "CONFIG_PATH", ...)` before constructing `OasisConfig()`.
 - `OasisConfig(BaseSettings)` — pydantic-settings class with `env_prefix="OASIS_"`.
-  - `index_paths: list[Path]` — directories to index; default `[]`.
-  - `exclude_patterns: list[str]` — extra gitignore patterns passed to the walker; default `[]`.
   - `db_path: Path` — SQLite database; default `~/.oasis/index.db`.
-  - `vector_path: Path` — LanceDB data directory; default `~/.oasis/vectors.lance`.
-  - `embedding_model: str` — sentence-transformers model; default `"all-MiniLM-L6-v2"`.
-  - `llm_provider: str` — `"anthropic"` or `"ollama"`; default `"anthropic"`.
 - `settings_customise_sources` — priority: init kwargs > `OASIS_*` env vars > TOML file > field defaults. Reads `CONFIG_PATH` at construction time so monkeypatching works.
 - `load_config() -> OasisConfig` — convenience wrapper; just calls `OasisConfig()`.
 - A missing or empty TOML file is handled gracefully (returns defaults).
+- Additional config fields (`embedding_model`, `vector_path`, `llm_provider`, etc.) will be added when the vector/LLM features are implemented.
 
 #### Index layer — `src/oasis/index/`
 
@@ -151,7 +144,6 @@ class Extractor(Protocol):
 - `Result` dataclass: `path`, `title`, `snippet`, `rank`.
 - `MATCH_START = "\x02"`, `MATCH_END = "\x03"` — match highlight sentinels (match `char(2)`/`char(3)` in SQL).
 
-**`store.py`** — gutted of SQL; thin re-export stub only. All callers now use `KeywordIndex`.
 
 **`walker.py`** — `walk(root, *, extra_excludes, respect_gitignore, exclude_dotfiles) -> Generator[Path]`. Exclusion is layered cheapest-first:
 1. `_DIR_EXCLUDES` frozenset — O(1) name check, prunes `dirnames` in-place so `os.walk` never descends. Covers `.git`, `__pycache__`, `node_modules`, `.venv`, `venv`, `dist`, `build`, `target`, and a handful of tool caches.
@@ -162,11 +154,8 @@ class Extractor(Protocol):
 
 **`pipeline.py`** — `index_directory(conn, root, *, force, extra_excludes, on_file) -> dict[str, int]`. Uses `walk(root, extra_excludes=extra_excludes)` instead of `rglob`. No `is_file()` guard needed — walker yields only files. `extra_excludes` is forwarded so callers can inject additional patterns without touching the walker defaults. Calls `path.stat()` once per file and passes both `st.st_size` and `st.st_mtime` to `is_unchanged` — change detection is hash-of-(size,mtime), not raw mtime comparison. `extractor.extract()` and `idx.upsert()` are each wrapped in `try/except Exception` — any unexpected raise increments `failed` and continues; the run is never aborted by a single bad file.
 
-#### Query layer — `src/oasis/query/search.py`
-Gutted of SQL; re-exports `Result as SearchResult`, `MATCH_START`, `MATCH_END` from `keyword.py` for backward compatibility.
-
 #### CLI — `src/oasis/cli/app.py` + `src/oasis/__init__.py`
-Entry point: `oasis = "oasis:main"` in `pyproject.toml` → `__init__.py` → `app()`. Default `db_path` comes from `load_config().db_path` (resolves to `~/.oasis/index.db` unless overridden by TOML or env var). `src/oasis/cli/main.py` is legacy and no longer wired up.
+Entry point: `oasis = "oasis:main"` in `pyproject.toml` → `__init__.py` → `app()`. Default `db_path` comes from `load_config().db_path` (resolves to `~/.oasis/index.db` unless overridden by TOML or env var).
 
 **`oasis index <path>`**
 - `--db PATH` — default from config
@@ -206,7 +195,7 @@ Entry point: `oasis = "oasis:main"` in `pyproject.toml` → `__init__.py` → `a
 | `extensions` is a `frozenset` class attribute, not a property | Immutable, hashable, cheaper; signals it never changes at runtime |
 | Models live in `src/oasis/models.py`, not in `extractors/base.py` | Shared models belong at the package root; avoids circular imports as more modules grow |
 | `extraction_errors: list[str]` on `ExtractedDocument` | Supports partial-success extraction (e.g. PDF where one page is corrupted) |
-| Registry dispatches via `can_handle()`, not a raw dict | Keeps the door open for extractors with non-trivial matching (e.g. MIME sniffing) |
+| Registry dispatches via extension dict, not `can_handle()` loop | O(1) lookup; all four extractors had identical `can_handle()` bodies — eliminated the method entirely |
 | Language detection runs on `text[:2000]` | Avoids processing entire large files; first 2000 chars is sufficient |
 | PDF per-page exceptions caught individually | One corrupted page shouldn't discard the rest of the document |
 | Scanned PDFs return `None`, not `ExtractedDocument` with empty text | Empty text is useless to the indexer; OCR is deferred |
