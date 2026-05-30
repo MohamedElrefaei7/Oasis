@@ -29,17 +29,14 @@ class TestDocxExtractorInterface:
     def test_extensions_is_frozenset(self, extractor: DocxExtractor) -> None:
         assert isinstance(extractor.extensions, frozenset)
 
-    def test_can_handle_docx(self, extractor: DocxExtractor) -> None:
-        assert extractor.can_handle(Path("report.docx")) is True
+    def test_extensions_contains_docx(self, extractor: DocxExtractor) -> None:
+        assert ".docx" in extractor.extensions
 
-    def test_can_handle_uppercase(self, extractor: DocxExtractor) -> None:
-        assert extractor.can_handle(Path("REPORT.DOCX")) is True
+    def test_extensions_excludes_pdf(self, extractor: DocxExtractor) -> None:
+        assert ".pdf" not in extractor.extensions
 
-    def test_cannot_handle_pdf(self, extractor: DocxExtractor) -> None:
-        assert extractor.can_handle(Path("report.pdf")) is False
-
-    def test_cannot_handle_txt(self, extractor: DocxExtractor) -> None:
-        assert extractor.can_handle(Path("notes.txt")) is False
+    def test_extensions_excludes_txt(self, extractor: DocxExtractor) -> None:
+        assert ".txt" not in extractor.extensions
 
 
 class TestDocxExtractorSuccess:

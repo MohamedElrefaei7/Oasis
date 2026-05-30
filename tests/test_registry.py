@@ -34,11 +34,11 @@ class TestGetExtractor:
     def test_uppercase_extension(self) -> None:
         assert get_extractor(Path("NOTES.TXT")) is not None
 
-    def test_returned_extractor_can_handle_path(self) -> None:
+    def test_returned_extractor_covers_extension(self) -> None:
         path = Path("notes.txt")
         extractor = get_extractor(path)
         assert extractor is not None
-        assert extractor.can_handle(path) is True
+        assert path.suffix.lower() in extractor.extensions
 
     def test_round_trip_txt(self) -> None:
         path = FIXTURES / "sample.txt"

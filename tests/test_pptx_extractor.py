@@ -29,20 +29,17 @@ class TestPptxExtractorInterface:
     def test_extensions_is_frozenset(self, extractor: PptxExtractor) -> None:
         assert isinstance(extractor.extensions, frozenset)
 
-    def test_can_handle_pptx(self, extractor: PptxExtractor) -> None:
-        assert extractor.can_handle(Path("deck.pptx")) is True
+    def test_extensions_contains_pptx(self, extractor: PptxExtractor) -> None:
+        assert ".pptx" in extractor.extensions
 
-    def test_can_handle_uppercase(self, extractor: PptxExtractor) -> None:
-        assert extractor.can_handle(Path("DECK.PPTX")) is True
+    def test_extensions_excludes_pdf(self, extractor: PptxExtractor) -> None:
+        assert ".pdf" not in extractor.extensions
 
-    def test_cannot_handle_pdf(self, extractor: PptxExtractor) -> None:
-        assert extractor.can_handle(Path("deck.pdf")) is False
+    def test_extensions_excludes_docx(self, extractor: PptxExtractor) -> None:
+        assert ".docx" not in extractor.extensions
 
-    def test_cannot_handle_docx(self, extractor: PptxExtractor) -> None:
-        assert extractor.can_handle(Path("deck.docx")) is False
-
-    def test_cannot_handle_txt(self, extractor: PptxExtractor) -> None:
-        assert extractor.can_handle(Path("notes.txt")) is False
+    def test_extensions_excludes_txt(self, extractor: PptxExtractor) -> None:
+        assert ".txt" not in extractor.extensions
 
 
 class TestPptxExtractorSuccess:

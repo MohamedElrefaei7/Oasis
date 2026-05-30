@@ -40,17 +40,14 @@ class TestPdfExtractorInterface:
     def test_extensions_is_frozenset(self, extractor: PdfExtractor) -> None:
         assert isinstance(extractor.extensions, frozenset)
 
-    def test_can_handle_pdf(self, extractor: PdfExtractor) -> None:
-        assert extractor.can_handle(Path("document.pdf")) is True
+    def test_extensions_contains_pdf(self, extractor: PdfExtractor) -> None:
+        assert ".pdf" in extractor.extensions
 
-    def test_can_handle_uppercase(self, extractor: PdfExtractor) -> None:
-        assert extractor.can_handle(Path("DOCUMENT.PDF")) is True
+    def test_extensions_excludes_txt(self, extractor: PdfExtractor) -> None:
+        assert ".txt" not in extractor.extensions
 
-    def test_cannot_handle_txt(self, extractor: PdfExtractor) -> None:
-        assert extractor.can_handle(Path("notes.txt")) is False
-
-    def test_cannot_handle_docx(self, extractor: PdfExtractor) -> None:
-        assert extractor.can_handle(Path("report.docx")) is False
+    def test_extensions_excludes_docx(self, extractor: PdfExtractor) -> None:
+        assert ".docx" not in extractor.extensions
 
 
 class TestPdfExtractorSuccess:

@@ -216,20 +216,27 @@ Entry point: `oasis = "oasis:main"` in `pyproject.toml` → `__init__.py` → `a
 
 ---
 
-## Tests — 232 total, all passing
+## Tests — 332 total, all passing
 | File | Count | Covers |
 |---|---|---|
-| `test_extractors.py` | 22 | `TextExtractor` |
-| `test_pdf_extractor.py` | 16 | `PdfExtractor` |
-| `test_docx_extractor.py` | 16 | `DocxExtractor` |
-| `test_pptx_extractor.py` | 19 | `PptxExtractor` |
-| `test_registry.py` | 14 | Registry dispatch + round-trips |
-| `test_walker.py` | 29 | Walker exclusions, dotfiles, gitignore, patterns, generator contract |
-| `test_keyword.py` | 22 | `_file_hash`, `is_unchanged` (new/after-upsert/changed-size/changed-mtime), `count`, `delete` (FTS removal), `search` (match, stemming, sentinels, limit, rank) |
-| `test_pipeline.py` | 18 | All stat branches (indexed/skipped/failed/unsupported), force flag, `on_file` callback, extractor returning None, extractor raising, upsert raising, one failure doesn't stop others |
-| `test_config.py` | 22 | `CONFIG_PATH`, all six field defaults, TOML loading per field, missing/empty TOML, env var overrides (wins over TOML and defaults), unprefixed env vars ignored, `load_config()` |
-| `test_cli.py` | 34 | All five commands (index/search/status/reset/open), error paths, verbose/force/limit flags, confirmation prompt, `open` mocks `subprocess.run`, correct file selected by index, last-results persistence |
-| `test_integration.py` | 20 | End-to-end: real files → `index_directory` → `KeywordIndex.search`. Store/retrieve, path correctness, snippet sentinels, stemming, markdown, nested dirs, no duplicates; walker exclusions (named dirs, dotfiles, dotdirs, `.gitignore`, `extra_excludes`); incremental reindex (mtime change, size change, updated content replaces old, new file on second run, force flag) |
+| `test_extractors.py` | 20 | `TextExtractor` interface + extraction |
+| `test_pdf_extractor.py` | 16 | `PdfExtractor` interface + success/failure paths |
+| `test_docx_extractor.py` | 16 | `DocxExtractor` interface + success/failure paths |
+| `test_pptx_extractor.py` | 18 | `PptxExtractor` interface + success/failure paths |
+| `test_registry.py` | 14 | Registry dispatch + round-trips for all four formats |
+| `test_extractor_edges.py` | 30 | Empty files, non-UTF8, blank DOCX/PPTX, missing metadata, large text, unicode, raw markdown |
+| `test_models.py` | 10 | `DocumentMetadata` defaults + `model_dump`, `ExtractedDocument` field coercion |
+| `test_walker.py` | 29 | Baseline exclusions, dotfiles, gitignore, patterns, generator contract |
+| `test_walker_edges.py` | 18 | Symlinks, no-extension files, extra exclusion dirs, multi-pattern excludes, gitignore comments/read-error, lazy generator |
+| `test_keyword.py` | 22 | `_file_hash`, `is_unchanged`, `count`, `delete`, `search` (match, stemming, sentinels, limit, rank) |
+| `test_keyword_edges.py` | 18 | `_file_hash(None, None)`, `last_indexed_at`, FTS re-upsert update, bad FTS5 syntax, unicode, empty text, title match, delete+re-upsert, rank ordering |
+| `test_db.py` | 18 | `open_db` dir creation, WAL mode, row factory, idempotency, FTS INSERT/UPDATE/DELETE triggers, data persistence, UNIQUE constraint |
+| `test_pipeline.py` | 18 | All stat branches, force flag, `on_file` callback, extractor errors, one failure doesn't abort the run |
+| `test_human_size.py` | 15 | `_human_size` for all unit boundaries (B, KB, MB, GB, TB), fractional values, return type |
+| `test_config.py` | 11 | `CONFIG_PATH`, `db_path` default + TOML load + env var priority + unknown-field validation error, `load_config()` |
+| `test_cli.py` | 34 | All five commands, error paths, verbose/force/limit flags, confirmation prompt, `subprocess.run` mock, last-results persistence |
+| `test_cli_edges.py` | 21 | Bad FTS5 syntax (exit 1 + tip message), WAL/SHM deletion on reset, corrupted JSON, out-of-range `n`, status exact count, summary zero-count omission, last-results not written on no-match |
+| `test_integration.py` | 20 | End-to-end: files → pipeline → search; stemming; walker exclusions; incremental re-index |
 
 ---
 

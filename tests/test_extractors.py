@@ -33,17 +33,11 @@ class TestTextExtractorInterface:
     def test_extensions_contains_md(self, extractor: TextExtractor) -> None:
         assert ".md" in extractor.extensions
 
-    def test_can_handle_txt(self, extractor: TextExtractor, txt_file: Path) -> None:
-        assert extractor.can_handle(txt_file) is True
+    def test_extensions_excludes_pdf(self, extractor: TextExtractor) -> None:
+        assert ".pdf" not in extractor.extensions
 
-    def test_can_handle_md(self, extractor: TextExtractor, md_file: Path) -> None:
-        assert extractor.can_handle(md_file) is True
-
-    def test_cannot_handle_pdf(self, extractor: TextExtractor) -> None:
-        assert extractor.can_handle(Path("document.pdf")) is False
-
-    def test_cannot_handle_docx(self, extractor: TextExtractor) -> None:
-        assert extractor.can_handle(Path("report.docx")) is False
+    def test_extensions_excludes_docx(self, extractor: TextExtractor) -> None:
+        assert ".docx" not in extractor.extensions
 
     def test_returns_none_for_missing_file(self, extractor: TextExtractor, tmp_path: Path) -> None:
         assert extractor.extract(tmp_path / "nonexistent.txt") is None
