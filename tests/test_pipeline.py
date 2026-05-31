@@ -1,13 +1,15 @@
 import sqlite3
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 
 from oasis.extractors.text import TextExtractor
 from oasis.index.db import open_db
 from oasis.index.keyword import KeywordIndex
-from oasis.index.pipeline import index_directory
+from oasis.index.pipeline import EMBED_BATCH, index_directory
+from oasis.index.vector import VectorIndex
 
 
 @pytest.fixture
@@ -23,12 +25,12 @@ def conn(tmp_path: Path) -> sqlite3.Connection:
 
 def test_returns_all_stat_keys(conn: sqlite3.Connection, tmp_path: Path) -> None:
     stats = index_directory(conn, tmp_path)
-    assert set(stats.keys()) == {"indexed", "skipped", "failed", "unsupported"}
+    assert set(stats.keys()) == {"indexed", "skipped", "failed", "unsupported", "chunks"}
 
 
 def test_empty_directory_all_zeros(conn: sqlite3.Connection, tmp_path: Path) -> None:
     stats = index_directory(conn, tmp_path)
-    assert stats == {"indexed": 0, "skipped": 0, "failed": 0, "unsupported": 0}
+    assert stats == {"indexed": 0, "skipped": 0, "failed": 0, "unsupported": 0, "chunks": 0}
 
 
 # ---------------------------------------------------------------------------
@@ -192,3 +194,186 @@ def test_on_file_none_is_safe(conn: sqlite3.Connection, tmp_path: Path) -> None:
     (tmp_path / "doc.txt").write_text("hi")
     stats = index_directory(conn, tmp_path, on_file=None)
     assert stats["indexed"] == 1
+
+
+# ---------------------------------------------------------------------------
+# chunks key — always present
+# ---------------------------------------------------------------------------
+
+
+def test_chunks_zero_without_embedder(conn: sqlite3.Connection, tmp_path: Path) -> None:
+    (tmp_path / "doc.txt").write_text("hello world")
+    vec_idx = MagicMock(spec=VectorIndex)
+    stats = index_directory(conn, tmp_path, vector_index=vec_idx)
+    assert stats["chunks"] == 0
+
+
+def test_chunks_zero_without_vector_index(conn: sqlite3.Connection, tmp_path: Path) -> None:
+    (tmp_path / "doc.txt").write_text("hello world")
+    emb = _fake_embedder()
+    stats = index_directory(conn, tmp_path, embedder=emb)
+    assert stats["chunks"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Helpers for vector tests
+# ---------------------------------------------------------------------------
+
+
+def _fake_embedder(dim: int = 4) -> MagicMock:
+    m = MagicMock()
+    m.dimension = dim
+    m.embed.side_effect = lambda texts: np.zeros((len(texts), dim), dtype=np.float32)
+    return m
+
+
+def _fake_vector_index() -> MagicMock:
+    return MagicMock(spec=VectorIndex)
+
+
+# ---------------------------------------------------------------------------
+# embed called / vector upsert called
+# ---------------------------------------------------------------------------
+
+
+def test_embed_called_for_indexed_file(conn: sqlite3.Connection, tmp_path: Path) -> None:
+    (tmp_path / "doc.txt").write_text("hello world")
+    emb = _fake_embedder()
+    index_directory(conn, tmp_path, vector_index=_fake_vector_index(), embedder=emb)
+    emb.embed.assert_called()
+
+
+def test_embed_not_called_when_no_files_indexed(
+    conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    emb = _fake_embedder()
+    index_directory(conn, tmp_path, vector_index=_fake_vector_index(), embedder=emb)
+    emb.embed.assert_not_called()
+
+
+def test_vector_upsert_called_for_indexed_file(
+    conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    (tmp_path / "doc.txt").write_text("hello world")
+    vec_idx = _fake_vector_index()
+    index_directory(conn, tmp_path, vector_index=vec_idx, embedder=_fake_embedder())
+    vec_idx.upsert_chunks.assert_called()
+
+
+def test_vector_delete_called_before_upsert(
+    conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    (tmp_path / "doc.txt").write_text("hello world")
+    vec_idx = _fake_vector_index()
+    call_order: list[str] = []
+    vec_idx.delete_by_doc_id.side_effect = lambda _: call_order.append("delete")
+    vec_idx.upsert_chunks.side_effect = lambda _: call_order.append("upsert")
+    index_directory(conn, tmp_path, vector_index=vec_idx, embedder=_fake_embedder())
+    assert call_order.index("delete") < call_order.index("upsert")
+
+
+# ---------------------------------------------------------------------------
+# chunks stat
+# ---------------------------------------------------------------------------
+
+
+def test_chunks_stat_equals_chunks_produced(
+    conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    (tmp_path / "doc.txt").write_text("hello world")
+    stats = index_directory(
+        conn, tmp_path,
+        vector_index=_fake_vector_index(),
+        embedder=_fake_embedder(),
+    )
+    # "hello world" is a short text → exactly 1 chunk
+    assert stats["chunks"] == 1
+
+
+def test_chunks_stat_sums_across_docs(
+    conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    (tmp_path / "a.txt").write_text("hello world")
+    (tmp_path / "b.txt").write_text("foo bar baz")
+    stats = index_directory(
+        conn, tmp_path,
+        vector_index=_fake_vector_index(),
+        embedder=_fake_embedder(),
+    )
+    assert stats["chunks"] == 2
+
+
+# ---------------------------------------------------------------------------
+# on_chunks_progress callback
+# ---------------------------------------------------------------------------
+
+
+def test_on_chunks_progress_not_called_without_embedding(
+    conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    (tmp_path / "doc.txt").write_text("hello world")
+    calls: list[tuple[int, int]] = []
+    index_directory(conn, tmp_path, on_chunks_progress=lambda d, t: calls.append((d, t)))
+    assert calls == []
+
+
+def test_on_chunks_progress_first_call_done_zero(
+    conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    (tmp_path / "doc.txt").write_text("hello world")
+    calls: list[tuple[int, int]] = []
+    index_directory(
+        conn, tmp_path,
+        vector_index=_fake_vector_index(),
+        embedder=_fake_embedder(),
+        on_chunks_progress=lambda d, t: calls.append((d, t)),
+    )
+    assert calls[0][0] == 0
+
+
+def test_on_chunks_progress_last_call_done_equals_total(
+    conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    (tmp_path / "doc.txt").write_text("hello world")
+    calls: list[tuple[int, int]] = []
+    index_directory(
+        conn, tmp_path,
+        vector_index=_fake_vector_index(),
+        embedder=_fake_embedder(),
+        on_chunks_progress=lambda d, t: calls.append((d, t)),
+    )
+    done, total = calls[-1]
+    assert done == total
+
+
+def test_on_chunks_progress_total_matches_chunks_stat(
+    conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    (tmp_path / "doc.txt").write_text("hello world")
+    calls: list[tuple[int, int]] = []
+    stats = index_directory(
+        conn, tmp_path,
+        vector_index=_fake_vector_index(),
+        embedder=_fake_embedder(),
+        on_chunks_progress=lambda d, t: calls.append((d, t)),
+    )
+    assert calls[0][1] == stats["chunks"]
+
+
+# ---------------------------------------------------------------------------
+# Skipped files are not re-embedded
+# ---------------------------------------------------------------------------
+
+
+def test_skipped_file_not_re_embedded(
+    conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    (tmp_path / "doc.txt").write_text("hello world")
+    emb = _fake_embedder()
+    vec_idx = _fake_vector_index()
+
+    index_directory(conn, tmp_path, vector_index=vec_idx, embedder=emb)
+    first_embed_count = emb.embed.call_count
+
+    index_directory(conn, tmp_path, vector_index=vec_idx, embedder=emb)
+    assert emb.embed.call_count == first_embed_count  # no new embed calls

@@ -1,7 +1,8 @@
 import json
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 from typer.testing import CliRunner
 
@@ -10,6 +11,27 @@ from oasis.cli.app import app, _LAST_RESULTS_PATH
 from oasis.index.db import open_db
 
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def _mock_heavy_deps():
+    """Prevent real model loading and LanceDB I/O in CLI tests."""
+    fake_model = MagicMock()
+    fake_model.get_embedding_dimension.return_value = 4
+    fake_model.encode.side_effect = lambda texts, **kw: np.zeros((len(texts), 4), dtype=np.float32)
+
+    mock_table = MagicMock()
+    merge = MagicMock()
+    merge.when_matched_update_all.return_value = merge
+    merge.when_not_matched_insert_all.return_value = merge
+    mock_table.merge_insert.return_value = merge
+    mock_table.count_rows.return_value = 0
+    mock_db = MagicMock()
+    mock_db.create_table.return_value = mock_table
+
+    with patch("oasis.index.embeddings.SentenceTransformer", return_value=fake_model), \
+         patch("oasis.index.vector.lancedb.connect", return_value=mock_db):
+        yield
 
 
 def _db(tmp_path: Path) -> Path:

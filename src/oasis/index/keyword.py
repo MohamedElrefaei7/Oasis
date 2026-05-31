@@ -130,3 +130,10 @@ class KeywordIndex:
             (str(path),),
         ).fetchone()
         return row is not None and row["content_hash"] == _file_hash(size, mtime)
+
+    def get_doc_id(self, path: Path) -> int | None:
+        row = self._conn.execute(
+            "SELECT id FROM documents WHERE path = ?",
+            (str(path),),
+        ).fetchone()
+        return row["id"] if row else None

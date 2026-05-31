@@ -6,14 +6,32 @@ from pathlib import Path
 
 import typer
 from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    ProgressColumn,
+    SpinnerColumn,
+    TextColumn,
+    TimeRemainingColumn,
+)
 from rich.table import Table
 from rich.text import Text
 
 from oasis.config import load_config
 from oasis.index.db import open_db
+from oasis.index.embeddings import SentenceTransformerEmbedder
 from oasis.index.keyword import MATCH_END, MATCH_START, KeywordIndex
 from oasis.index.pipeline import index_directory
+from oasis.index.vector import VectorIndex
+
+class _ChunksPerSecColumn(ProgressColumn):
+    def render(self, task) -> Text:  # type: ignore[override]
+        speed = task.speed
+        if speed is None:
+            return Text("—", style="progress.data.speed")
+        return Text(f"{speed:.0f} chunks/s", style="progress.data.speed")
+
 
 app = typer.Typer(
     name="oasis",
@@ -76,6 +94,18 @@ _STATUS_STYLE: dict[str, str] = {
 }
 
 
+_EMBED_PROGRESS_COLUMNS = (
+    SpinnerColumn(),
+    TextColumn("[progress.description]{task.description}"),
+    BarColumn(),
+    MofNCompleteColumn(),
+    TextColumn("•"),
+    TimeRemainingColumn(),
+    TextColumn("•"),
+    _ChunksPerSecColumn(),
+)
+
+
 @app.command()
 def index(
     path: Path = typer.Argument(..., help="Directory to index"),
@@ -91,25 +121,54 @@ def index(
     db_path = _db_path(db)
     conn = open_db(db_path)
 
+    with _console.status("[dim]Initializing embedding model…[/dim]", spinner="dots"):
+        emb = SentenceTransformerEmbedder()
+        vec_idx = VectorIndex(db_path.with_name(db_path.stem + ".lance"), dimension=emb.dimension)
+
     if verbose:
         def on_file(p: Path, status: str) -> None:
             style = _STATUS_STYLE.get(status, "")
             _console.print(Text.assemble((f"{status:<11}", style), f"  {p}"))
 
-        stats = index_directory(conn, path, force=force, on_file=on_file)
+        embed_p: list[Progress] = []
+        embed_t: list[int] = []
+
+        def on_chunks_progress(done: int, total: int) -> None:
+            if not embed_p:
+                p = Progress(*_EMBED_PROGRESS_COLUMNS, console=_console)
+                p.start()
+                embed_p.append(p)
+                embed_t.append(p.add_task("[cyan]Embedding[/cyan]…", total=total))
+            embed_p[0].update(embed_t[0], completed=done)
+            if done >= total:
+                embed_p[0].stop()
+
+        stats = index_directory(
+            conn, path, force=force, on_file=on_file,
+            vector_index=vec_idx, embedder=emb,
+            on_chunks_progress=on_chunks_progress,
+        )
     else:
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("{task.description}"),
-            console=_console,
-            transient=True,
-        ) as progress:
-            task = progress.add_task("Scanning…", total=None)
+        with Progress(*_EMBED_PROGRESS_COLUMNS, console=_console) as progress:
+            scan_task = progress.add_task("Scanning…", total=None)
+            embed_task_id: list[int] = []
 
             def on_file(p: Path, status: str) -> None:
-                progress.update(task, description=f"[dim]{status}[/dim]  [cyan]{p.name}[/cyan]")
+                progress.update(scan_task, description=f"[dim]{status}[/dim]  [cyan]{p.name}[/cyan]")
 
-            stats = index_directory(conn, path, force=force, on_file=on_file)
+            def on_chunks_progress(done: int, total: int) -> None:
+                if not embed_task_id:
+                    progress.update(scan_task, visible=False)
+                    embed_task_id.append(
+                        progress.add_task("[cyan]Embedding[/cyan]…", total=total)
+                    )
+                progress.update(embed_task_id[0], completed=done)
+
+            stats = index_directory(
+                conn, path, force=force, on_file=on_file,
+                vector_index=vec_idx, embedder=emb,
+                on_chunks_progress=on_chunks_progress,
+            )
 
     conn.close()
 

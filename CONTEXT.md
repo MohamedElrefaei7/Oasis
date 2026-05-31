@@ -32,9 +32,12 @@ src/oasis/
 │   └── text.py
 └── index/
     ├── __init__.py
+    ├── chunker.py
     ├── db.py
+    ├── embeddings.py
     ├── keyword.py
     ├── pipeline.py
+    ├── vector.py
     └── walker.py
 
 tests/
@@ -152,10 +155,20 @@ class Extractor(Protocol):
 - `followlinks=False` — never follows symlinks, preventing infinite loops.
 - Nested `.gitignore` files are not yet loaded (only root-level).
 
-**`pipeline.py`** — `index_directory(conn, root, *, force, extra_excludes, on_file) -> dict[str, int]`. Uses `walk(root, extra_excludes=extra_excludes)` instead of `rglob`. No `is_file()` guard needed — walker yields only files. `extra_excludes` is forwarded so callers can inject additional patterns without touching the walker defaults. Calls `path.stat()` once per file and passes both `st.st_size` and `st.st_mtime` to `is_unchanged` — change detection is hash-of-(size,mtime), not raw mtime comparison. `extractor.extract()` and `idx.upsert()` are each wrapped in `try/except Exception` — any unexpected raise increments `failed` and continues; the run is never aborted by a single bad file.
+**`pipeline.py`** — `index_directory(conn, root, *, force, extra_excludes, on_file, vector_index, embedder, on_chunks_progress) -> dict[str, int]`. Two-phase:
+- **Phase 1** (walk → extract → keyword): same as before. If `vector_index` and `embedder` are both provided, successfully indexed docs are chunked (`chunk_document`) and queued in `_PendingDoc` records.
+- **Phase 2** (embed → vector upsert): runs if `pending` is non-empty. Deletes stale vector chunks for each doc (`vector_index.delete_by_doc_id`), flattens all chunks, iterates in `EMBED_BATCH=64` batches — `embedder.embed(texts)` → `ChunkRow` objects → `vector_index.upsert_chunks(rows)`. Calls `on_chunks_progress(done, total)` after each batch (and once with `done=0` to announce total).
+- Stats dict gains `"chunks"` key (always present, 0 when embedding disabled). `chunk_id` is `"{path}:{chunk_index}"` — stable across re-indexes, unique per document.
+- `get_doc_id(path) -> int | None` added to `KeywordIndex` — used to retrieve the SQLite row ID after upsert so LanceDB rows can reference the same document.
 
 #### CLI — `src/oasis/cli/app.py` + `src/oasis/__init__.py`
 Entry point: `oasis = "oasis:main"` in `pyproject.toml` → `__init__.py` → `app()`. Default `db_path` comes from `load_config().db_path` (resolves to `~/.oasis/index.db` unless overridden by TOML or env var).
+
+**Embedding + vector index**: always enabled in `oasis index`. Before scanning, the command initializes `SentenceTransformerEmbedder()` (uses `_MODEL_CACHE` — only loads once per process) and `VectorIndex` (LanceDB at `{db_stem}.lance` next to the SQLite DB). A `_console.status()` spinner covers this ~0.5 s load.
+
+**Progress bar**: unified `Progress` bar for both scan and embed phases. Non-verbose mode: scan task (indeterminate spinner) hides itself when embedding starts; embed task shows BarColumn + MofNCompleteColumn + TimeRemainingColumn + `_ChunksPerSecColumn`. The bar is not transient — final state stays visible. Verbose mode: per-file printing during scan; a lazily-created Progress bar for embedding.
+
+`_ChunksPerSecColumn(ProgressColumn)` renders `task.speed` as `"N chunks/s"` (Rich automatically computes speed from `progress.update(..., advance=n)` calls).
 
 **`oasis index <path>`**
 - `--db PATH` — default from config
@@ -216,7 +229,7 @@ Entry point: `oasis = "oasis:main"` in `pyproject.toml` → `__init__.py` → `a
 
 ---
 
-## Tests — 332 total, all passing
+## Tests — 463 total, all passing
 | File | Count | Covers |
 |---|---|---|
 | `test_extractors.py` | 20 | `TextExtractor` interface + extraction |
@@ -237,10 +250,72 @@ Entry point: `oasis = "oasis:main"` in `pyproject.toml` → `__init__.py` → `a
 | `test_cli.py` | 34 | All five commands, error paths, verbose/force/limit flags, confirmation prompt, `subprocess.run` mock, last-results persistence |
 | `test_cli_edges.py` | 21 | Bad FTS5 syntax (exit 1 + tip message), WAL/SHM deletion on reset, corrupted JSON, out-of-range `n`, status exact count, summary zero-count omission, last-results not written on no-match |
 | `test_integration.py` | 20 | End-to-end: files → pipeline → search; stemming; walker exclusions; incremental re-index |
+| `test_chunker.py` | 35 | Empty/whitespace input, single-chunk short text, token count accuracy, multi-chunk long text, sequential indices, first/last chunk sizes, overlap shared-token invariant, full reconstruction, exact boundary values, custom parameters, unicode/CJK, invalid argument errors |
+| `test_embeddings.py` | 25 | `_load_model` caching (same instance, call count), multi-model isolation, `embed` shape/dtype/empty, encode call args (batch_size, show_progress_bar, convert_to_numpy), all texts in one call, protocol compliance |
+| `test_vector.py` | 58 | `_build_schema` fields + fixed-size list type, `VectorIndex` construction (connect path, exist_ok), `upsert_chunks` merge_insert chain + row serialization, `search` metric/select/limit/where/results, `delete_by_doc_id` SQL predicate, `count`, integration tests (real LanceDB) covering upsert, overwrite, delete, where filter, limit, empty table, persistence across open |
+| `test_pipeline.py` (updated) | 31 | All original tests + `"chunks"` key always present, vector/embedder optional, embed called for indexed files, delete before upsert, `chunks` stat sums across docs, `on_chunks_progress` callback (first call done=0, last done==total, total matches stat), skipped files not re-embedded |
+
+---
+
+#### Chunker — `src/oasis/index/chunker.py`
+- `Chunk` dataclass: `chunk_index: int`, `text: str`, `token_count: int`.
+- `chunk_document(text, *, chunk_size=500, overlap=50) -> list[Chunk]`
+  - Empty / whitespace-only text → `[]`.
+  - Raises `ValueError` if `chunk_size <= 0` or `overlap >= chunk_size`.
+  - Encodes the full text with tiktoken `cl100k_base`, slides a window of `chunk_size` tokens stepping by `chunk_size - overlap` each time, decodes each window back to text.
+  - Short text (< `chunk_size` tokens) produces exactly one chunk.
+  - The last chunk may be smaller than `chunk_size`.
+- `_ENC` is a module-level `tiktoken.Encoding` instance (loaded once at import time; tiktoken caches the encoding file on disk).
+- Constants `CHUNK_SIZE = 500`, `OVERLAP = 50` are exported for callers that want the defaults without magic numbers.
+
+| Decision | Reason |
+|---|---|
+| tiktoken `cl100k_base` encoding | Close to Claude's token counts; already a project dependency; stable and well-tested |
+| `@dataclass` for `Chunk`, not Pydantic | Internal to the index layer; no cross-boundary serialization needed; keeps it lightweight |
+| Module-level `_ENC` | Avoids re-loading the encoding on every call; safe because tiktoken encodings are thread-safe and immutable |
+| `text.strip()` empty check before encoding | Avoids inserting meaningless empty chunks for documents that are all whitespace |
 
 ---
 
 ## Up Next
 
 - Nested `.gitignore` support in walker (load per-directory, not just root)
-- Vector index layer — LanceDB + sentence-transformers for semantic search
+#### Embedding interface — `src/oasis/index/embeddings.py`
+- `EmbeddingModel` Protocol: `dimension: int` + `embed(texts: list[str]) -> np.ndarray`.
+- `SentenceTransformerEmbedder(model_name, batch_size)` — wraps `sentence-transformers`.
+  - `_load_model(name)` — module-level cache (`_MODEL_CACHE: dict[str, SentenceTransformer]`); the transformer is loaded at most once per model name per process.
+  - `embed([])` returns `np.empty((0, dimension), dtype=float32)` without calling the model.
+  - All texts passed to a single `model.encode(texts, batch_size=..., show_progress_bar=False, convert_to_numpy=True)` call — sentence-transformers handles internal batching.
+  - Uses `get_embedding_dimension()` (v5 API; `get_sentence_embedding_dimension()` is deprecated).
+- `DEFAULT_MODEL = "all-MiniLM-L6-v2"` (384-dim), `BATCH_SIZE = 32`.
+
+| Decision | Reason |
+|---|---|
+| Module-level `_MODEL_CACHE` dict | Loading a transformer costs ~seconds + hundreds of MB; must not repeat it per embedder instance or per request |
+| Single `encode()` call, not a loop | sentence-transformers already splits into batches internally; looping one-by-one would kill throughput |
+| `show_progress_bar=False` | Output would corrupt CLI / log output in production use |
+| `assert dim is not None` on `get_embedding_dimension()` | Returns `None` for degenerate model configs; fail fast with a clear message instead of a confusing downstream shape error |
+
+#### Vector store — `src/oasis/index/vector.py`
+- `ChunkRow` dataclass: `chunk_id: str`, `doc_id: int`, `text: str`, `vector: np.ndarray`, `extension: str`, `mtime: float`, `path: str`.
+- `VectorResult` dataclass: `chunk_id: str`, `doc_id: int`, `text: str`, `path: str`, `score: float` (mapped from `_distance`).
+- `VectorIndex(db_path, dimension)` — opens or creates a LanceDB database and the `chunks` table. Schema built dynamically: `vector` column typed as `pa.list_(pa.float32(), dimension)` (a `FixedSizeList`).
+- `upsert_chunks(records)` — converts `vector` to a Python list (`float32`), calls `merge_insert('chunk_id').when_matched_update_all().when_not_matched_insert_all().execute(rows)`. No-ops on empty list.
+- `search(query_vector, *, limit=10, where=None) -> list[VectorResult]` — cosine metric; selects `chunk_id`, `doc_id`, `text`, `path`, `_distance`; optional SQL `where` filter (e.g. `"extension = '.txt'"`). Zero/NaN query vectors return empty results (cosine of zero vector is undefined in LanceDB).
+- `delete_by_doc_id(doc_id)` — `tbl.delete(f"doc_id = {doc_id}")`.
+- `count() -> int` — `tbl.count_rows()`.
+
+| Decision | Reason |
+|---|---|
+| `pa.list_(pa.float32(), dimension)` for vector column | LanceDB requires fixed-size list for ANN index; dimension is injected at construction time |
+| Cosine metric | All-MiniLM-L6-v2 embeddings are not normalized by default; cosine handles arbitrary magnitudes |
+| `_distance` mapped to `score` on `VectorResult` | Lower is better for cosine/L2; callers score-fuse with BM25 scores and need a consistent field name |
+| No-op on `upsert_chunks([])` | Avoids a no-op merge_insert call; LanceDB merge_insert with empty input would still open a write transaction |
+| `from __future__ import annotations` | Defers evaluation of type hints; avoids circular import issues as the module graph grows |
+
+---
+
+## Up Next
+
+- Hybrid retrieval pipeline: run BM25 (keyword) + vector search in parallel, fuse scores (RRF or linear blend), return ranked results
+- NL query parser: call Claude API to decompose a natural-language query into FTS5 keywords + optional metadata filters
