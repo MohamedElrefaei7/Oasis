@@ -1,3 +1,4 @@
+import enum
 import json
 import sqlite3
 import subprocess
@@ -24,6 +25,16 @@ from oasis.index.embeddings import SentenceTransformerEmbedder
 from oasis.index.keyword import MATCH_END, MATCH_START, KeywordIndex
 from oasis.index.pipeline import index_directory
 from oasis.index.vector import VectorIndex
+from oasis.query.reranker import CrossEncoderReranker
+from oasis.query.retriever import DEFAULT_TOP_N, hybrid_search
+from oasis.query.snippets import text_snippet
+
+
+class SearchMode(str, enum.Enum):
+    keyword = "keyword"
+    semantic = "semantic"
+    hybrid = "hybrid"
+
 
 class _ChunksPerSecColumn(ProgressColumn):
     def render(self, task) -> Text:  # type: ignore[override]
@@ -80,6 +91,23 @@ def _highlight_snippet(raw: str) -> Text:
         else:
             out.append(part)
     return out
+
+
+def _render_results_table(rows: list[tuple[Path, str | None, Text]]) -> None:
+    cwd = Path.cwd()
+    table = Table(box=None, show_header=True, header_style="bold dim", padding=(0, 2))
+    table.add_column("#", style="bold", justify="right", no_wrap=True, min_width=2)
+    table.add_column("File", style="cyan", no_wrap=True)
+    table.add_column("Title")
+    table.add_column("Snippet")
+    for i, (path, title, snippet) in enumerate(rows, 1):
+        try:
+            display = path.relative_to(cwd)
+        except ValueError:
+            display = path
+        file_link = Text(str(display), style=f"cyan link {path.resolve().as_uri()}")
+        table.add_row(str(i), file_link, title or "", snippet)
+    _console.print(table)
 
 
 # ---------------------------------------------------------------------------
@@ -190,9 +218,15 @@ def index(
 
 @app.command(name="search")
 def cmd_search(
-    query: str = typer.Argument(..., help="Search query (FTS5 syntax supported)"),
+    query: str = typer.Argument(..., help="Search query"),
     db: Path | None = typer.Option(None, "--db", help="SQLite database path"),
-    limit: int = typer.Option(20, "--limit", "-n", help="Maximum number of results"),
+    limit: int = typer.Option(DEFAULT_TOP_N, "--limit", "-n", help="Maximum number of results"),
+    mode: SearchMode = typer.Option(
+        SearchMode.hybrid,
+        "--mode", "-m",
+        case_sensitive=False,
+        help="Retrieval strategy: keyword (FTS5), semantic (vector), or hybrid (fused + reranked).",
+    ),
 ) -> None:
     """Search the index and print matching files with highlighted snippets."""
     db_path = _db_path(db)
@@ -201,9 +235,65 @@ def cmd_search(
         _err.print("[red]No index found.[/red] Run [bold]oasis index <path>[/bold] first.")
         raise typer.Exit(1)
 
+    lance_path = db_path.with_name(db_path.stem + ".lance")
+
+    # ------------------------------------------------------------------ keyword
+    if mode == SearchMode.keyword:
+        conn = open_db(db_path)
+        try:
+            kw_results = KeywordIndex(conn).search(query, limit=limit)
+        except sqlite3.OperationalError as exc:
+            _err.print(f"[red]Query error:[/red] {exc}")
+            _err.print('Tip: wrap phrases in double quotes — e.g. oasis search \\"machine learning\\"')
+            raise typer.Exit(1)
+        finally:
+            conn.close()
+
+        if not kw_results:
+            _console.print("[dim]No results.[/dim]")
+            return
+
+        rows = [(r.path, r.title, _highlight_snippet(r.snippet)) for r in kw_results]
+        _render_results_table(rows)
+        _console.print(f"\n[dim]{len(rows)} result(s)  ·  mode: keyword  ·  db: {db_path}[/dim]")
+        _save_last_results([r.path for r in kw_results])
+        return
+
+    # ------------------------------------------------- semantic / hybrid: load models
+    with _console.status("[dim]Loading models…[/dim]", spinner="dots"):
+        emb = SentenceTransformerEmbedder()
+        vec_idx = VectorIndex(lance_path, dimension=emb.dimension)
+
+    # ----------------------------------------------------------------- semantic
+    if mode == SearchMode.semantic:
+        query_vec = emb.embed([query])[0]
+        # Over-fetch to leave room for per-doc chunk dedup.
+        raw = vec_idx.search(query_vec, limit=limit * 3)
+
+        best: dict[str, object] = {}
+        for r in raw:
+            if r.path not in best or r.score < best[r.path].score:  # type: ignore[union-attr]
+                best[r.path] = r
+        deduped = sorted(best.values(), key=lambda r: r.score)[:limit]  # type: ignore[attr-defined]
+
+        if not deduped:
+            _console.print("[dim]No results.[/dim]")
+            return
+
+        rows = [
+            (Path(r.path), None, _highlight_snippet(text_snippet(r.text, query)))  # type: ignore[attr-defined]
+            for r in deduped
+        ]
+        _render_results_table(rows)
+        _console.print(f"\n[dim]{len(rows)} result(s)  ·  mode: semantic  ·  db: {db_path}[/dim]")
+        _save_last_results([Path(r.path) for r in deduped])  # type: ignore[attr-defined]
+        return
+
+    # ------------------------------------------------------------------ hybrid
     conn = open_db(db_path)
     try:
-        results = KeywordIndex(conn).search(query, limit=limit)
+        # Fetch extra candidates so the reranker has a larger pool to work with.
+        candidates = hybrid_search(conn, vec_idx, emb, query, top_n=max(limit * 2, 20))
     except sqlite3.OperationalError as exc:
         _err.print(f"[red]Query error:[/red] {exc}")
         _err.print('Tip: wrap phrases in double quotes — e.g. oasis search \\"machine learning\\"')
@@ -211,28 +301,17 @@ def cmd_search(
     finally:
         conn.close()
 
-    if not results:
+    reranker = CrossEncoderReranker()
+    final = reranker.rerank(query, candidates, top_n=limit)
+
+    if not final:
         _console.print("[dim]No results.[/dim]")
         return
 
-    cwd = Path.cwd()
-    table = Table(box=None, show_header=True, header_style="bold dim", padding=(0, 2))
-    table.add_column("#", style="bold", justify="right", no_wrap=True, min_width=2)
-    table.add_column("File", style="cyan", no_wrap=True)
-    table.add_column("Title")
-    table.add_column("Snippet")
-
-    for i, r in enumerate(results, 1):
-        try:
-            display = r.path.relative_to(cwd)
-        except ValueError:
-            display = r.path
-        file_link = Text(str(display), style=f"cyan link {r.path.resolve().as_uri()}")
-        table.add_row(str(i), file_link, r.title or "", _highlight_snippet(r.snippet))
-
-    _console.print(table)
-    _console.print(f"\n[dim]{len(results)} result(s)  ·  db: {db_path}[/dim]")
-    _save_last_results([r.path for r in results])
+    rows = [(r.path, r.title, _highlight_snippet(r.snippet)) for r in final]
+    _render_results_table(rows)
+    _console.print(f"\n[dim]{len(final)} result(s)  ·  mode: hybrid  ·  db: {db_path}[/dim]")
+    _save_last_results([r.path for r in final])
 
 
 # ---------------------------------------------------------------------------

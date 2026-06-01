@@ -21,6 +21,7 @@ MATCH_END = "\x03"
 @dataclass
 class Result:
     path: Path
+    doc_id: int
     title: str | None
     snippet: str
     rank: float
@@ -89,6 +90,7 @@ class KeywordIndex:
         rows = self._conn.execute(
             """
             SELECT
+                d.id,
                 d.path,
                 d.title,
                 snippet(documents_fts, 2, char(2), char(3), '…', 20) AS snippet,
@@ -105,6 +107,7 @@ class KeywordIndex:
         return [
             Result(
                 path=Path(row["path"]),
+                doc_id=row["id"],
                 title=row["title"],
                 snippet=row["snippet"],
                 rank=row["rank"],

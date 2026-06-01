@@ -30,15 +30,20 @@ src/oasis/
 │   ├── pptx.py
 │   ├── registry.py
 │   └── text.py
-└── index/
+├── index/
+│   ├── __init__.py
+│   ├── chunker.py
+│   ├── db.py
+│   ├── embeddings.py
+│   ├── keyword.py
+│   ├── pipeline.py
+│   ├── vector.py
+│   └── walker.py
+└── query/
     ├── __init__.py
-    ├── chunker.py
-    ├── db.py
-    ├── embeddings.py
-    ├── keyword.py
-    ├── pipeline.py
-    ├── vector.py
-    └── walker.py
+    ├── retriever.py
+    ├── reranker.py
+    └── snippets.py
 
 tests/
 ├── __init__.py
@@ -177,11 +182,15 @@ Entry point: `oasis = "oasis:main"` in `pyproject.toml` → `__init__.py` → `a
 - Final summary: `N indexed  N skipped  N unsupported  N failed` (zero counts omitted)
 
 **`oasis search <query>`**
-- `--db PATH`, `--limit / -n` (default 20)
-- FTS5 query with porter stemming ("extracting" matches "extracts")
-- Rich Table: `#` rank (bold, `min_width=2` so it survives narrow terminals), File (relative to cwd, clickable `file://` hyperlink), Title, Snippet with bold-yellow match highlights
+- `--db PATH`, `--limit / -n` (default 10 = `DEFAULT_TOP_N`), `--mode / -m` (default `hybrid`)
+- Three retrieval modes controlled by `SearchMode(str, enum.Enum)`:
+  - **`keyword`**: FTS5 BM25 search via `KeywordIndex.search()`, porter stemming. Catches `OperationalError` for bad FTS5 syntax.
+  - **`semantic`**: Loads `SentenceTransformerEmbedder` + `VectorIndex` (spinner), embeds query, runs cosine vector search, deduplicates to best chunk per path, highlights via `text_snippet`. Does not use FTS5 — immune to FTS5 syntax errors.
+  - **`hybrid`** (default): Loads models (spinner), calls `hybrid_search(top_n=max(limit*2, 20))` for a larger candidate pool, reranks with `CrossEncoderReranker(top_n=limit)`. Catches `OperationalError` (FTS5 used internally). Best quality.
+- `_render_results_table(rows)` — extracted helper; builds `#`/`File`/`Title`/`Snippet` table, `file://` hyperlinks, `relative_to(cwd)` path display.
+- Footer: `N result(s)  ·  mode: {mode}  ·  db: {db_path}`
 - After display, saves `[str(path), ...]` to `~/.oasis/last_results.json` for `oasis open`
-- "No results." if empty; friendly error if DB doesn't exist; catches `OperationalError` for bad FTS5 syntax
+- "No results." if empty; friendly error if DB doesn't exist; bold-yellow `MATCH_START`/`MATCH_END` highlighting in all modes
 
 **`oasis open <n>`**
 - Opens result `#n` from the last search in the system default application (`open` on macOS)
@@ -229,7 +238,7 @@ Entry point: `oasis = "oasis:main"` in `pyproject.toml` → `__init__.py` → `a
 
 ---
 
-## Tests — 463 total, all passing
+## Tests — 587 total, all passing
 | File | Count | Covers |
 |---|---|---|
 | `test_extractors.py` | 20 | `TextExtractor` interface + extraction |
@@ -254,6 +263,11 @@ Entry point: `oasis = "oasis:main"` in `pyproject.toml` → `__init__.py` → `a
 | `test_embeddings.py` | 25 | `_load_model` caching (same instance, call count), multi-model isolation, `embed` shape/dtype/empty, encode call args (batch_size, show_progress_bar, convert_to_numpy), all texts in one call, protocol compliance |
 | `test_vector.py` | 58 | `_build_schema` fields + fixed-size list type, `VectorIndex` construction (connect path, exist_ok), `upsert_chunks` merge_insert chain + row serialization, `search` metric/select/limit/where/results, `delete_by_doc_id` SQL predicate, `count`, integration tests (real LanceDB) covering upsert, overwrite, delete, where filter, limit, empty table, persistence across open |
 | `test_pipeline.py` (updated) | 31 | All original tests + `"chunks"` key always present, vector/embedder optional, embed called for indexed files, delete before upsert, `chunks` stat sums across docs, `on_chunks_progress` callback (first call done=0, last done==total, total matches stat), skipped files not re-embedded |
+| `test_reranker.py` | 36 | `_clean` strips `MATCH_START`/`MATCH_END` markers, preserves plain text; `_load_model` caching (same instance, call count, separate models); `CrossEncoderReranker` construction (default/custom model name, shared cache); `rerank` return type/count, empty input, single result; score replacement + descending sort, correct result moved to top, other fields preserved; `predict` called once with `show_progress_bar=False`, pairs have query first and clean snippet second; `top_n` truncation keeps highest-scored, None returns all, 0 returns empty |
+| `test_cli.py` (updated) | 44 | All original tests + `--mode keyword/semantic/hybrid` flags, footer shows mode name, `-m` short flag, invalid mode exits non-zero, default mode is hybrid |
+| `test_cli_edges.py` (updated) | 27 | All original edge tests + keyword/hybrid mode exits 1 on bad FTS5 syntax, semantic mode ignores FTS5 syntax (exit 0), no-results in keyword and hybrid modes |
+| `test_retriever.py` | 33 | `_rrf` unit tests (reciprocal score formula, rank ordering, doc-in-both-lists bonus, empty input), `hybrid_search` return type/shape, result fields (path, doc_id, title, snippet, score), ranking correctness (sorted by score, dual-list doc outranks single-list), kw-only and vec-only docs included, path deduplication, chunk dedup keeps best-scoring chunk, embedder called once with query text, vector search limit forwarded, constants |
+| `test_snippets.py` | 40 | `_extract_terms` (simple, multi-word, boolean operators stripped, quoted phrases expanded, empty/operators-only), `_highlight_terms` (wraps match, case-insensitive, multiple terms, empty terms no-op, no match), `fts_snippet` (returns string, contains markers, None when doc absent, None on OperationalError, custom num_tokens, constant), `text_snippet` (returns string, no ellipsis on short text, highlights terms, no-match starts from beginning, empty query, truncation, leading/trailing ellipsis), `get_snippet` (uses FTS when available, falls back when doc not in index, fallback highlights terms, falls back on OperationalError) |
 
 ---
 
@@ -315,7 +329,63 @@ Entry point: `oasis = "oasis:main"` in `pyproject.toml` → `__init__.py` → `a
 
 ---
 
+#### Hybrid retriever — `src/oasis/query/retriever.py`
+- `HybridResult` dataclass: `path: Path`, `doc_id: int`, `title: str | None`, `snippet: str`, `score: float`.
+- `_rrf(ranked_lists: list[list[str]]) -> dict[str, float]` — pure Reciprocal Rank Fusion; `score(d) = Σ 1/(RRF_K + rank_i)` for each ranked list where d appears. `RRF_K = 60`.
+- `hybrid_search(conn, vector_index, embedder, query, *, top_n=10, candidate_limit=50) -> list[HybridResult]`:
+  1. FTS5 via `KeywordIndex.search(query, limit=50)` → document-level ranked list
+  2. `embedder.embed([query])[0]` → query vector; `vector_index.search(vec, limit=50)` → chunk-level results
+  3. Deduplicate vector results to best chunk per doc (lowest `_distance`)
+  4. RRF over the two path-keyed ranked lists → fused scores
+  5. Assemble `HybridResult` objects, picking `doc_id`/`title`/`snippet` from FTS5 if available, else from vector; sort by score descending; return top N
+- `snippet`: FTS5 snippet with `MATCH_START`/`MATCH_END` markers when the doc matched keyword search; raw chunk text otherwise (compatible with `_highlight_snippet` in CLI).
+- `KeywordIndex.Result` gained `doc_id: int` field (SQL updated to include `d.id`); needed to populate `HybridResult.doc_id` for FTS5-only hits.
+
+| Decision | Reason |
+|---|---|
+| RRF over score normalization | BM25 and cosine distances are on different scales; rank-based fusion avoids calibration entirely |
+| `k=60` | Standard constant from the original RRF paper; large enough to dampen rank differences while preserving rank-1 bonus |
+| Chunk dedup before RRF | Multiple chunks from one doc would otherwise inflate that doc's rank; dedup first makes both lists operate at the same granularity (document-level) |
+| FTS5 snippet preferred over chunk text | FTS5 snippet has highlight markers and is trimmed to the matching context; chunk text is raw |
+| `candidate_limit=50` for both searches | Large enough to surface relevant docs; small enough to keep latency predictable |
+
+---
+
+#### Cross-encoder reranker — `src/oasis/query/reranker.py`
+- `CrossEncoderReranker(model_name)` — wraps `sentence_transformers.CrossEncoder`. Model loaded once per name via `_MODEL_CACHE` (same pattern as `SentenceTransformerEmbedder`).
+- `rerank(query, results, *, top_n=None) -> list[HybridResult]` — builds `(query, clean_snippet)` pairs for every result, calls `model.predict(pairs, show_progress_bar=False)`, replaces each result's `score` field with the cross-encoder logit via `dataclasses.replace()`, sorts descending, returns first `top_n` (or all if `top_n=None`).
+- `_clean(text)` — strips `MATCH_START`/`MATCH_END` FTS5 markers before scoring (cross-encoder should see plain text, not `\x02`/`\x03`).
+- `DEFAULT_CE_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"` — trained on MS MARCO passage ranking; strong quality/speed tradeoff at 6 layers.
+- `np.atleast_1d(np.asarray(...))` guards against scalar output from single-pair predict calls.
+
+| Decision | Reason |
+|---|---|
+| Replace `score` with CE logit | `score` always reflects current ordering basis; callers don't need to distinguish RRF score vs CE score |
+| `show_progress_bar=False` | Suppress tqdm output that would corrupt CLI / log output |
+| `dataclasses.replace()` instead of mutation | Returns new immutable snapshots; original list unchanged for callers that need it |
+| `top_n` optional | Reranking top-20 and then taking top-10 is a common pattern; caller decides the final window |
+
+---
+
+#### Snippet generation — `src/oasis/query/snippets.py`
+- `SNIPPET_TOKENS = 40` — FTS5 token budget passed to `snippet()` (≈200 chars for English prose).
+- `_extract_terms(query) -> list[str]` — extracts plain word tokens from an FTS5 query expression, skipping boolean operators (`AND`, `OR`, `NOT`, `NEAR`); quoted phrases are expanded to individual words.
+- `_highlight_terms(text, terms) -> str` — wraps all occurrences of `terms` in `text` with `MATCH_START`/`MATCH_END` via case-insensitive regex substitution.
+- `fts_snippet(conn, query, doc_id, *, num_tokens=SNIPPET_TOKENS) -> str | None` — queries `documents_fts` with `snippet(documents_fts, 2, char(2), char(3), '…', num_tokens)` filtered by `rowid = doc_id`; returns `None` when the doc isn't in the index or if an `OperationalError` is raised (bad FTS5 syntax).
+- `text_snippet(text, query, *, length=200) -> str` — pure-Python fallback: locates the first regex match of any extracted term, centers a `length`-char window on it, prepends/appends `'…'` when truncated, then calls `_highlight_terms` on the excerpt.
+- `get_snippet(conn, query, doc_id, fallback_text, *, length=200) -> str` — tries `fts_snippet` first; falls back to `text_snippet(fallback_text, ...)` on `None`.
+
+| Decision | Reason |
+|---|---|
+| FTS5 `snippet()` preferred over pure-Python | SQLite's built-in snippet function is aware of porter stemming and FTS5's internal token positions; it finds the best window without re-tokenizing |
+| `char(2)`/`char(3)` for highlight markers | Matches `MATCH_START`/`MATCH_END` constants without any string interpolation in SQL |
+| `OperationalError` caught in `fts_snippet` | Bad FTS5 syntax raises at execute time; caller shouldn't crash — fall back to plain-text gracefully |
+| Column index 2 in `snippet()` | `documents_fts` columns are `path`(0), `title`(1), `content`(2); we want snippets from the document body |
+| `_extract_terms` strips operators before regex | Regex-matching `AND` or `NOT` against document text would produce false highlights |
+| `text_snippet` centers on first match | Users scan from the top; showing the first occurrence is the most natural fallback |
+
+---
+
 ## Up Next
 
-- Hybrid retrieval pipeline: run BM25 (keyword) + vector search in parallel, fuse scores (RRF or linear blend), return ranked results
 - NL query parser: call Claude API to decompose a natural-language query into FTS5 keywords + optional metadata filters

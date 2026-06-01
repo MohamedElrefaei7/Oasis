@@ -7,6 +7,7 @@ import pytest
 from typer.testing import CliRunner
 
 import oasis.cli.app as app_module
+import oasis.query.reranker as reranker_mod
 from oasis.cli.app import app, _LAST_RESULTS_PATH
 from oasis.index.db import open_db
 
@@ -20,18 +21,32 @@ def _mock_heavy_deps():
     fake_model.get_embedding_dimension.return_value = 4
     fake_model.encode.side_effect = lambda texts, **kw: np.zeros((len(texts), 4), dtype=np.float32)
 
+    mock_search = MagicMock()
+    mock_search.metric.return_value = mock_search
+    mock_search.select.return_value = mock_search
+    mock_search.limit.return_value = mock_search
+    mock_search.where.return_value = mock_search
+    mock_search.to_list.return_value = []
+
     mock_table = MagicMock()
     merge = MagicMock()
     merge.when_matched_update_all.return_value = merge
     merge.when_not_matched_insert_all.return_value = merge
     mock_table.merge_insert.return_value = merge
     mock_table.count_rows.return_value = 0
+    mock_table.search.return_value = mock_search
     mock_db = MagicMock()
     mock_db.create_table.return_value = mock_table
 
+    fake_ce = MagicMock()
+    fake_ce.predict.side_effect = lambda pairs, **kw: np.zeros(len(pairs), dtype=np.float32)
+
+    reranker_mod._MODEL_CACHE.clear()
     with patch("oasis.index.embeddings.SentenceTransformer", return_value=fake_model), \
-         patch("oasis.index.vector.lancedb.connect", return_value=mock_db):
+         patch("oasis.index.vector.lancedb.connect", return_value=mock_db), \
+         patch("oasis.query.reranker.CrossEncoder", return_value=fake_ce):
         yield
+    reranker_mod._MODEL_CACHE.clear()
 
 
 def _db(tmp_path: Path) -> Path:
@@ -320,6 +335,90 @@ def test_open_prints_filename(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     with patch("oasis.cli.app.subprocess.run"):
         result = runner.invoke(app, ["open", "1"])
     assert "report.txt" in result.output
+
+
+# ---------------------------------------------------------------------------
+# search — --mode flag
+# ---------------------------------------------------------------------------
+
+
+def test_search_mode_keyword_exits_0(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    (tmp_path / "doc.txt").write_text("the quick brown fox")
+    runner.invoke(app, ["index", str(tmp_path), "--db", str(db)])
+    result = runner.invoke(app, ["search", "fox", "--db", str(db), "--mode", "keyword"])
+    assert result.exit_code == 0
+
+
+def test_search_mode_keyword_finds_result(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    (tmp_path / "doc.txt").write_text("the quick brown fox")
+    runner.invoke(app, ["index", str(tmp_path), "--db", str(db)])
+    result = runner.invoke(app, ["search", "fox", "--db", str(db), "--mode", "keyword"])
+    assert "1 result" in result.output
+
+
+def test_search_mode_keyword_footer_says_keyword(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    (tmp_path / "doc.txt").write_text("the quick brown fox")
+    runner.invoke(app, ["index", str(tmp_path), "--db", str(db)])
+    result = runner.invoke(app, ["search", "fox", "--db", str(db), "--mode", "keyword"])
+    assert "mode: keyword" in result.output
+
+
+def test_search_mode_semantic_exits_0(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    (tmp_path / "doc.txt").write_text("content")
+    runner.invoke(app, ["index", str(tmp_path), "--db", str(db)])
+    result = runner.invoke(app, ["search", "query", "--db", str(db), "--mode", "semantic"])
+    assert result.exit_code == 0
+
+
+def test_search_mode_semantic_no_results_with_empty_vector_index(tmp_path: Path) -> None:
+    # Mocked vector search returns [] → no semantic results.
+    db = _db(tmp_path)
+    (tmp_path / "doc.txt").write_text("content here")
+    runner.invoke(app, ["index", str(tmp_path), "--db", str(db)])
+    result = runner.invoke(app, ["search", "content", "--db", str(db), "--mode", "semantic"])
+    assert "No results" in result.output
+
+
+def test_search_mode_hybrid_exits_0(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    (tmp_path / "doc.txt").write_text("the quick brown fox")
+    runner.invoke(app, ["index", str(tmp_path), "--db", str(db)])
+    result = runner.invoke(app, ["search", "fox", "--db", str(db), "--mode", "hybrid"])
+    assert result.exit_code == 0
+
+
+def test_search_mode_hybrid_footer_says_hybrid(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    (tmp_path / "doc.txt").write_text("the quick brown fox")
+    runner.invoke(app, ["index", str(tmp_path), "--db", str(db)])
+    result = runner.invoke(app, ["search", "fox", "--db", str(db), "--mode", "hybrid"])
+    assert "mode: hybrid" in result.output
+
+
+def test_search_mode_short_flag(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    (tmp_path / "doc.txt").write_text("the quick brown fox")
+    runner.invoke(app, ["index", str(tmp_path), "--db", str(db)])
+    result = runner.invoke(app, ["search", "fox", "--db", str(db), "-m", "keyword"])
+    assert result.exit_code == 0
+
+
+def test_search_mode_invalid_exits_nonzero(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    result = runner.invoke(app, ["search", "fox", "--db", str(db), "--mode", "badmode"])
+    assert result.exit_code != 0
+
+
+def test_search_default_mode_is_hybrid(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    (tmp_path / "doc.txt").write_text("the quick brown fox")
+    runner.invoke(app, ["index", str(tmp_path), "--db", str(db)])
+    result = runner.invoke(app, ["search", "fox", "--db", str(db)])
+    assert "mode: hybrid" in result.output
 
 
 def test_search_saves_last_results(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

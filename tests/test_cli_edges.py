@@ -9,6 +9,7 @@ import pytest
 from typer.testing import CliRunner
 
 import oasis.cli.app as app_module
+import oasis.query.reranker as reranker_mod
 from oasis.cli.app import app
 
 runner = CliRunner()
@@ -21,18 +22,32 @@ def _mock_heavy_deps():
     fake_model.get_embedding_dimension.return_value = 4
     fake_model.encode.side_effect = lambda texts, **kw: np.zeros((len(texts), 4), dtype=np.float32)
 
+    mock_search = MagicMock()
+    mock_search.metric.return_value = mock_search
+    mock_search.select.return_value = mock_search
+    mock_search.limit.return_value = mock_search
+    mock_search.where.return_value = mock_search
+    mock_search.to_list.return_value = []
+
     mock_table = MagicMock()
     merge = MagicMock()
     merge.when_matched_update_all.return_value = merge
     merge.when_not_matched_insert_all.return_value = merge
     mock_table.merge_insert.return_value = merge
     mock_table.count_rows.return_value = 0
+    mock_table.search.return_value = mock_search
     mock_db = MagicMock()
     mock_db.create_table.return_value = mock_table
 
+    fake_ce = MagicMock()
+    fake_ce.predict.side_effect = lambda pairs, **kw: np.zeros(len(pairs), dtype=np.float32)
+
+    reranker_mod._MODEL_CACHE.clear()
     with patch("oasis.index.embeddings.SentenceTransformer", return_value=fake_model), \
-         patch("oasis.index.vector.lancedb.connect", return_value=mock_db):
+         patch("oasis.index.vector.lancedb.connect", return_value=mock_db), \
+         patch("oasis.query.reranker.CrossEncoder", return_value=fake_ce):
         yield
+    reranker_mod._MODEL_CACHE.clear()
 
 
 def _db(tmp_path: Path) -> Path:
@@ -209,6 +224,54 @@ def test_search_does_not_save_last_results_on_no_match(
     _index(tmp_path, db)
     runner.invoke(app, ["search", "zzznomatch", "--db", str(db)])
     assert not fake.exists()
+
+
+# ---------------------------------------------------------------------------
+# search — mode-specific error handling
+# ---------------------------------------------------------------------------
+
+
+def test_search_keyword_mode_bad_fts5_exits_1(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    (tmp_path / "doc.txt").write_text("content")
+    _index(tmp_path, db)
+    result = runner.invoke(app, ["search", '"unclosed', "--db", str(db), "--mode", "keyword"])
+    assert result.exit_code == 1
+
+
+def test_search_hybrid_mode_bad_fts5_exits_1(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    (tmp_path / "doc.txt").write_text("content")
+    _index(tmp_path, db)
+    result = runner.invoke(app, ["search", '"unclosed', "--db", str(db), "--mode", "hybrid"])
+    assert result.exit_code == 1
+
+
+def test_search_semantic_mode_ignores_fts5_syntax(tmp_path: Path) -> None:
+    # Semantic mode embeds the query string as-is — no FTS5 parsing, no OperationalError.
+    db = _db(tmp_path)
+    (tmp_path / "doc.txt").write_text("content")
+    _index(tmp_path, db)
+    result = runner.invoke(app, ["search", '"unclosed', "--db", str(db), "--mode", "semantic"])
+    assert result.exit_code == 0
+
+
+def test_search_keyword_mode_no_results_shows_no_results(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    (tmp_path / "doc.txt").write_text("hello world")
+    _index(tmp_path, db)
+    result = runner.invoke(app, ["search", "zzznomatch", "--db", str(db), "--mode", "keyword"])
+    assert result.exit_code == 0
+    assert "No results" in result.output
+
+
+def test_search_hybrid_mode_no_results_shows_no_results(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    (tmp_path / "doc.txt").write_text("hello world")
+    _index(tmp_path, db)
+    result = runner.invoke(app, ["search", "zzznomatch", "--db", str(db), "--mode", "hybrid"])
+    assert result.exit_code == 0
+    assert "No results" in result.output
 
 
 def test_search_last_results_contains_correct_count(
