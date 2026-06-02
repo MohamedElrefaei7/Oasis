@@ -191,3 +191,80 @@ def test_search_rank_is_float(conn: sqlite3.Connection) -> None:
     idx.upsert(_doc(text="ranking test content"))
     results = idx.search("ranking")
     assert isinstance(results[0].rank, float)
+
+
+# ---------------------------------------------------------------------------
+# search — structured filters (4.5)
+# ---------------------------------------------------------------------------
+
+
+def test_search_after_excludes_older_docs(conn: sqlite3.Connection) -> None:
+    idx = KeywordIndex(conn)
+    idx.upsert(_doc("/tmp/old.txt", text="budget report", mtime=1000.0))
+    idx.upsert(_doc("/tmp/new.txt", text="budget report", mtime=9000.0))
+    results = idx.search("budget", after=5000.0)
+    paths = [str(r.path) for r in results]
+    assert "/tmp/new.txt" in paths
+    assert "/tmp/old.txt" not in paths
+
+
+def test_search_before_excludes_newer_docs(conn: sqlite3.Connection) -> None:
+    idx = KeywordIndex(conn)
+    idx.upsert(_doc("/tmp/old.txt", text="budget report", mtime=1000.0))
+    idx.upsert(_doc("/tmp/new.txt", text="budget report", mtime=9000.0))
+    results = idx.search("budget", before=5000.0)
+    paths = [str(r.path) for r in results]
+    assert "/tmp/old.txt" in paths
+    assert "/tmp/new.txt" not in paths
+
+
+def test_search_after_and_before_window(conn: sqlite3.Connection) -> None:
+    idx = KeywordIndex(conn)
+    idx.upsert(_doc("/tmp/a.txt", text="invoice", mtime=1000.0))
+    idx.upsert(_doc("/tmp/b.txt", text="invoice", mtime=5000.0))
+    idx.upsert(_doc("/tmp/c.txt", text="invoice", mtime=9000.0))
+    results = idx.search("invoice", after=2000.0, before=7000.0)
+    paths = [str(r.path) for r in results]
+    assert "/tmp/b.txt" in paths
+    assert "/tmp/a.txt" not in paths
+    assert "/tmp/c.txt" not in paths
+
+
+def test_search_folders_prefix_filter(conn: sqlite3.Connection) -> None:
+    idx = KeywordIndex(conn)
+    idx.upsert(_doc("/home/alice/docs/report.txt", text="quarterly results"))
+    idx.upsert(_doc("/home/bob/report.txt", text="quarterly results"))
+    results = idx.search("quarterly", folders=["/home/alice"])
+    paths = [str(r.path) for r in results]
+    assert "/home/alice/docs/report.txt" in paths
+    assert "/home/bob/report.txt" not in paths
+
+
+def test_search_folders_multiple_prefixes(conn: sqlite3.Connection) -> None:
+    idx = KeywordIndex(conn)
+    idx.upsert(_doc("/home/alice/a.txt", text="notes here"))
+    idx.upsert(_doc("/home/bob/b.txt", text="notes here"))
+    idx.upsert(_doc("/tmp/c.txt", text="notes here"))
+    results = idx.search("notes", folders=["/home/alice", "/home/bob"])
+    paths = [str(r.path) for r in results]
+    assert "/home/alice/a.txt" in paths
+    assert "/home/bob/b.txt" in paths
+    assert "/tmp/c.txt" not in paths
+
+
+def test_search_extensions_filter(conn: sqlite3.Connection) -> None:
+    idx = KeywordIndex(conn)
+    idx.upsert(_doc("/tmp/doc.pdf", text="contract details"))
+    idx.upsert(_doc("/tmp/doc.docx", text="contract details"))
+    results = idx.search("contract", extensions=[".pdf"])
+    paths = [str(r.path) for r in results]
+    assert "/tmp/doc.pdf" in paths
+    assert "/tmp/doc.docx" not in paths
+
+
+def test_search_no_filters_returns_all_matches(conn: sqlite3.Connection) -> None:
+    idx = KeywordIndex(conn)
+    idx.upsert(_doc("/tmp/a.txt", text="searchterm", mtime=1000.0))
+    idx.upsert(_doc("/tmp/b.txt", text="searchterm", mtime=9000.0))
+    results = idx.search("searchterm")
+    assert len(results) == 2

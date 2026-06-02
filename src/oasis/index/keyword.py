@@ -84,11 +84,49 @@ class KeywordIndex:
     # Reads
     # ------------------------------------------------------------------
 
-    def search(self, query: str, limit: int = 20) -> list[Result]:
-        # char(2) and char(3) produce MATCH_START/MATCH_END without any
-        # string interpolation — SQLite evaluates them as scalar expressions.
+    def search(
+        self,
+        query: str,
+        limit: int = 20,
+        *,
+        after: float | None = None,
+        before: float | None = None,
+        folders: list[str] | None = None,
+        extensions: list[str] | None = None,
+    ) -> list[Result]:
+        """Run an FTS5 query with optional structured filters.
+
+        Args:
+            after:      Minimum mtime (Unix timestamp, inclusive).
+            before:     Maximum mtime (Unix timestamp, exclusive).
+            folders:    Absolute path prefixes — rows whose path starts with any
+                        entry are kept (LIKE ``prefix/%`` matching).
+            extensions: Allowed file extensions, e.g. ``[".pdf", ".pptx"]``.
+        """
+        params: list[object] = [query]
+        extra: list[str] = []
+
+        if after is not None:
+            extra.append("d.mtime >= ?")
+            params.append(after)
+        if before is not None:
+            extra.append("d.mtime < ?")
+            params.append(before)
+        if folders:
+            conds = " OR ".join("d.path LIKE ?" for _ in folders)
+            extra.append(f"({conds})")
+            params.extend(f"{f.rstrip('/')}%" for f in folders)
+        if extensions:
+            phs = ",".join("?" * len(extensions))
+            extra.append(f"d.extension IN ({phs})")
+            params.extend(extensions)
+
+        params.append(limit)
+        where_extra = "".join(f"\n  AND {clause}" for clause in extra)
+
+        # char(2)/char(3) produce MATCH_START/MATCH_END without string interpolation.
         rows = self._conn.execute(
-            """
+            f"""
             SELECT
                 d.id,
                 d.path,
@@ -97,11 +135,11 @@ class KeywordIndex:
                 documents_fts.rank AS rank
             FROM documents_fts
             JOIN documents d ON d.id = documents_fts.rowid
-            WHERE documents_fts MATCH ?
+            WHERE documents_fts MATCH ?{where_extra}
             ORDER BY rank
             LIMIT ?
             """,
-            (query, limit),
+            params,
         ).fetchall()
 
         return [

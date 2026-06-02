@@ -3,19 +3,24 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
 
 from oasis.index.keyword import Result as KwResult
 from oasis.index.vector import VectorIndex, VectorResult
+from oasis.query.parser import DateRange, ParsedQuery
 from oasis.query.retriever import (
     CANDIDATE_LIMIT,
     DEFAULT_TOP_N,
     RRF_K,
     HybridResult,
+    _build_fts_query,
+    _build_kw_filters,
+    _build_vec_where,
     _rrf,
     hybrid_search,
 )
@@ -26,6 +31,23 @@ from oasis.query.retriever import (
 # ---------------------------------------------------------------------------
 
 DIM = 4
+
+
+def _pq(
+    q: str,
+    *,
+    keywords: list[str] | None = None,
+    file_types: list[str] | None = None,
+    date_range: DateRange | None = None,
+    folders: list[str] | None = None,
+) -> ParsedQuery:
+    return ParsedQuery(
+        semantic_query=q,
+        keywords=keywords or [],
+        file_types=file_types or [],
+        date_range=date_range,
+        folders=folders or [],
+    )
 
 
 def _kw(path: str, doc_id: int = 1, title: str | None = None,
@@ -51,7 +73,6 @@ def _fake_vec_index(results: list[VectorResult]) -> MagicMock:
 
 
 def _fake_conn(kw_results: list[KwResult]) -> MagicMock:
-    """Return a mock sqlite3.Connection that makes KeywordIndex.search return kw_results."""
     conn = MagicMock(spec=sqlite3.Connection)
     rows = [
         {
@@ -85,14 +106,12 @@ def test_rrf_single_list_rank_order_preserved() -> None:
 
 
 def test_rrf_doc_in_both_lists_scores_higher() -> None:
-    # "shared" appears in both; "only_kw" and "only_vec" appear in one each.
     scores = _rrf([["shared", "only_kw"], ["shared", "only_vec"]])
     assert scores["shared"] > scores["only_kw"]
     assert scores["shared"] > scores["only_vec"]
 
 
 def test_rrf_top_rank_in_both_beats_middle_in_both() -> None:
-    # rank-1 in both lists beats rank-2 in both lists.
     scores = _rrf([["best", "second"], ["best", "second"]])
     assert scores["best"] > scores["second"]
 
@@ -116,39 +135,155 @@ def test_rrf_k_constant_is_60() -> None:
 
 
 # ---------------------------------------------------------------------------
+# _build_fts_query
+# ---------------------------------------------------------------------------
+
+
+def test_build_fts_query_no_keywords() -> None:
+    assert _build_fts_query(_pq("machine learning")) == "machine learning"
+
+
+def test_build_fts_query_single_keyword_appended() -> None:
+    result = _build_fts_query(_pq("tax documents", keywords=["tax"]))
+    assert result.startswith("tax documents")
+    assert "tax" in result
+
+
+def test_build_fts_query_multi_word_keyword_quoted() -> None:
+    result = _build_fts_query(_pq("documents", keywords=["data protection"]))
+    assert '"data protection"' in result
+
+
+def test_build_fts_query_single_word_keyword_unquoted() -> None:
+    result = _build_fts_query(_pq("compliance", keywords=["GDPR"]))
+    assert "GDPR" in result
+    assert '"GDPR"' not in result
+
+
+def test_build_fts_query_multiple_keywords() -> None:
+    result = _build_fts_query(_pq("report", keywords=["Q3", "budget"]))
+    assert "Q3" in result
+    assert "budget" in result
+
+
+# ---------------------------------------------------------------------------
+# _build_vec_where
+# ---------------------------------------------------------------------------
+
+
+def test_build_vec_where_none_when_no_filters() -> None:
+    assert _build_vec_where(_pq("query")) is None
+
+
+def test_build_vec_where_file_types() -> None:
+    result = _build_vec_where(_pq("q", file_types=[".pdf"]))
+    assert result is not None
+    assert ".pdf" in result
+    assert "extension" in result
+
+
+def test_build_vec_where_date_after() -> None:
+    dr = DateRange(after=datetime(2024, 1, 1))
+    result = _build_vec_where(_pq("q", date_range=dr))
+    assert result is not None
+    assert "mtime >=" in result
+
+
+def test_build_vec_where_date_before() -> None:
+    dr = DateRange(before=datetime(2025, 1, 1))
+    result = _build_vec_where(_pq("q", date_range=dr))
+    assert result is not None
+    assert "mtime <" in result
+
+
+def test_build_vec_where_date_range_both() -> None:
+    dr = DateRange(after=datetime(2024, 1, 1), before=datetime(2025, 1, 1))
+    result = _build_vec_where(_pq("q", date_range=dr))
+    assert result is not None
+    assert "mtime >=" in result
+    assert "mtime <" in result
+
+
+def test_build_vec_where_folder() -> None:
+    result = _build_vec_where(_pq("q", folders=["/home/user/docs"]))
+    assert result is not None
+    assert "path LIKE" in result
+    assert "/home/user/docs" in result
+
+
+def test_build_vec_where_combines_with_and() -> None:
+    dr = DateRange(after=datetime(2024, 1, 1))
+    result = _build_vec_where(_pq("q", file_types=[".pdf"], date_range=dr))
+    assert result is not None
+    assert " AND " in result
+
+
+# ---------------------------------------------------------------------------
+# _build_kw_filters
+# ---------------------------------------------------------------------------
+
+
+def test_build_kw_filters_empty_for_plain_query() -> None:
+    assert _build_kw_filters(_pq("query")) == {}
+
+
+def test_build_kw_filters_after_key() -> None:
+    dr = DateRange(after=datetime(2024, 1, 1))
+    filters = _build_kw_filters(_pq("q", date_range=dr))
+    assert "after" in filters
+    assert isinstance(filters["after"], float)
+
+
+def test_build_kw_filters_before_key() -> None:
+    dr = DateRange(before=datetime(2025, 1, 1))
+    filters = _build_kw_filters(_pq("q", date_range=dr))
+    assert "before" in filters
+
+
+def test_build_kw_filters_extensions() -> None:
+    filters = _build_kw_filters(_pq("q", file_types=[".pdf"]))
+    assert filters.get("extensions") == [".pdf"]
+
+
+def test_build_kw_filters_folders_expanded() -> None:
+    filters = _build_kw_filters(_pq("q", folders=["/abs/path"]))
+    assert "/abs/path" in filters.get("folders", [])
+
+
+# ---------------------------------------------------------------------------
 # hybrid_search — return type and shape
 # ---------------------------------------------------------------------------
 
 
 def test_hybrid_search_returns_list() -> None:
     conn = _fake_conn([_kw("/a.txt", doc_id=1)])
-    result = hybrid_search(conn, _fake_vec_index([]), _fake_embedder(), "query")
+    result = hybrid_search(conn, _fake_vec_index([]), _fake_embedder(), _pq("query"))
     assert isinstance(result, list)
 
 
 def test_hybrid_search_returns_hybrid_results() -> None:
     conn = _fake_conn([_kw("/a.txt", doc_id=1)])
-    results = hybrid_search(conn, _fake_vec_index([]), _fake_embedder(), "query")
+    results = hybrid_search(conn, _fake_vec_index([]), _fake_embedder(), _pq("query"))
     assert all(isinstance(r, HybridResult) for r in results)
 
 
 def test_hybrid_search_empty_indexes_returns_empty() -> None:
     conn = _fake_conn([])
-    results = hybrid_search(conn, _fake_vec_index([]), _fake_embedder(), "query")
+    results = hybrid_search(conn, _fake_vec_index([]), _fake_embedder(), _pq("query"))
     assert results == []
 
 
 def test_hybrid_search_respects_top_n() -> None:
     kw = [_kw(f"/{i}.txt", doc_id=i) for i in range(20)]
     conn = _fake_conn(kw)
-    results = hybrid_search(conn, _fake_vec_index([]), _fake_embedder(), "q", top_n=5)
+    results = hybrid_search(conn, _fake_vec_index([]), _fake_embedder(), _pq("q"), top_n=5)
     assert len(results) <= 5
 
 
 def test_hybrid_search_default_top_n() -> None:
     kw = [_kw(f"/{i}.txt", doc_id=i, rank=-float(i)) for i in range(30)]
     conn = _fake_conn(kw)
-    results = hybrid_search(conn, _fake_vec_index([]), _fake_embedder(), "q")
+    results = hybrid_search(conn, _fake_vec_index([]), _fake_embedder(), _pq("q"))
     assert len(results) <= DEFAULT_TOP_N
 
 
@@ -159,52 +294,52 @@ def test_hybrid_search_default_top_n() -> None:
 
 def test_result_path_is_path_object() -> None:
     conn = _fake_conn([_kw("/a.txt", doc_id=1)])
-    results = hybrid_search(conn, _fake_vec_index([]), _fake_embedder(), "q")
+    results = hybrid_search(conn, _fake_vec_index([]), _fake_embedder(), _pq("q"))
     assert isinstance(results[0].path, Path)
 
 
 def test_result_doc_id_from_keyword() -> None:
     conn = _fake_conn([_kw("/a.txt", doc_id=7)])
-    results = hybrid_search(conn, _fake_vec_index([]), _fake_embedder(), "q")
+    results = hybrid_search(conn, _fake_vec_index([]), _fake_embedder(), _pq("q"))
     assert results[0].doc_id == 7
 
 
 def test_result_doc_id_from_vector_when_kw_absent() -> None:
     conn = _fake_conn([])
     vec = _fake_vec_index([_vec("/b.txt", doc_id=42)])
-    results = hybrid_search(conn, vec, _fake_embedder(), "q")
+    results = hybrid_search(conn, vec, _fake_embedder(), _pq("q"))
     assert results[0].doc_id == 42
 
 
 def test_result_title_from_keyword() -> None:
     conn = _fake_conn([_kw("/a.txt", doc_id=1, title="My Doc")])
-    results = hybrid_search(conn, _fake_vec_index([]), _fake_embedder(), "q")
+    results = hybrid_search(conn, _fake_vec_index([]), _fake_embedder(), _pq("q"))
     assert results[0].title == "My Doc"
 
 
 def test_result_title_none_when_only_in_vector() -> None:
     conn = _fake_conn([])
     vec = _fake_vec_index([_vec("/b.txt", doc_id=1)])
-    results = hybrid_search(conn, vec, _fake_embedder(), "q")
+    results = hybrid_search(conn, vec, _fake_embedder(), _pq("q"))
     assert results[0].title is None
 
 
 def test_result_snippet_from_keyword() -> None:
     conn = _fake_conn([_kw("/a.txt", doc_id=1, snippet="the \x02fox\x03 jumped")])
-    results = hybrid_search(conn, _fake_vec_index([]), _fake_embedder(), "q")
+    results = hybrid_search(conn, _fake_vec_index([]), _fake_embedder(), _pq("q"))
     assert results[0].snippet == "the \x02fox\x03 jumped"
 
 
 def test_result_snippet_from_chunk_text_when_only_vector() -> None:
     conn = _fake_conn([])
     vec = _fake_vec_index([_vec("/b.txt", doc_id=1, text="chunk content here")])
-    results = hybrid_search(conn, vec, _fake_embedder(), "q")
+    results = hybrid_search(conn, vec, _fake_embedder(), _pq("q"))
     assert results[0].snippet == "chunk content here"
 
 
 def test_result_score_is_float() -> None:
     conn = _fake_conn([_kw("/a.txt", doc_id=1)])
-    results = hybrid_search(conn, _fake_vec_index([]), _fake_embedder(), "q")
+    results = hybrid_search(conn, _fake_vec_index([]), _fake_embedder(), _pq("q"))
     assert isinstance(results[0].score, float)
 
 
@@ -216,17 +351,16 @@ def test_result_score_is_float() -> None:
 def test_results_sorted_by_score_descending() -> None:
     kw = [_kw("/a.txt", doc_id=1), _kw("/b.txt", doc_id=2)]
     conn = _fake_conn(kw)
-    results = hybrid_search(conn, _fake_vec_index([]), _fake_embedder(), "q")
+    results = hybrid_search(conn, _fake_vec_index([]), _fake_embedder(), _pq("q"))
     scores = [r.score for r in results]
     assert scores == sorted(scores, reverse=True)
 
 
 def test_doc_in_both_lists_outranks_doc_in_one() -> None:
-    # "/shared.txt" appears in both kw and vec; "/kw_only.txt" only in kw.
     kw = [_kw("/shared.txt", doc_id=1), _kw("/kw_only.txt", doc_id=2)]
     vec = [_vec("/shared.txt", doc_id=1, score=0.05)]
     conn = _fake_conn(kw)
-    results = hybrid_search(conn, _fake_vec_index(vec), _fake_embedder(), "q")
+    results = hybrid_search(conn, _fake_vec_index(vec), _fake_embedder(), _pq("q"))
     paths = [str(r.path) for r in results]
     assert paths.index("/shared.txt") < paths.index("/kw_only.txt")
 
@@ -234,14 +368,14 @@ def test_doc_in_both_lists_outranks_doc_in_one() -> None:
 def test_kw_only_doc_included_in_results() -> None:
     kw = [_kw("/kw_only.txt", doc_id=1)]
     conn = _fake_conn(kw)
-    results = hybrid_search(conn, _fake_vec_index([]), _fake_embedder(), "q")
+    results = hybrid_search(conn, _fake_vec_index([]), _fake_embedder(), _pq("q"))
     assert any(r.path == Path("/kw_only.txt") for r in results)
 
 
 def test_vec_only_doc_included_in_results() -> None:
     conn = _fake_conn([])
     vec = _fake_vec_index([_vec("/vec_only.txt", doc_id=1)])
-    results = hybrid_search(conn, vec, _fake_embedder(), "q")
+    results = hybrid_search(conn, vec, _fake_embedder(), _pq("q"))
     assert any(r.path == Path("/vec_only.txt") for r in results)
 
 
@@ -250,7 +384,7 @@ def test_no_duplicate_paths_in_results() -> None:
     vec = [_vec("/a.txt", doc_id=1, chunk_id="a:0", score=0.1),
            _vec("/a.txt", doc_id=1, chunk_id="a:1", score=0.2)]
     conn = _fake_conn(kw)
-    results = hybrid_search(conn, _fake_vec_index(vec), _fake_embedder(), "q")
+    results = hybrid_search(conn, _fake_vec_index(vec), _fake_embedder(), _pq("q"))
     paths = [str(r.path) for r in results]
     assert len(paths) == len(set(paths))
 
@@ -261,15 +395,13 @@ def test_no_duplicate_paths_in_results() -> None:
 
 
 def test_chunk_dedup_keeps_lowest_distance() -> None:
-    """Two chunks from the same doc → only the better one (lower score) contributes."""
     conn = _fake_conn([])
     vec = _fake_vec_index([
-        _vec("/a.txt", doc_id=1, chunk_id="a:0", score=0.8),  # worse
-        _vec("/a.txt", doc_id=1, chunk_id="a:1", score=0.1),  # better
+        _vec("/a.txt", doc_id=1, chunk_id="a:0", score=0.8),
+        _vec("/a.txt", doc_id=1, chunk_id="a:1", score=0.1),
     ])
-    results = hybrid_search(conn, vec, _fake_embedder(), "q")
+    results = hybrid_search(conn, vec, _fake_embedder(), _pq("q"))
     assert len(results) == 1
-    # The snippet is the text of the best chunk (chunk_id "a:1")
     assert results[0].snippet == "chunk text"
 
 
@@ -280,7 +412,7 @@ def test_chunk_dedup_with_multiple_docs() -> None:
         _vec("/a.txt", doc_id=1, chunk_id="a:1", score=0.2),
         _vec("/b.txt", doc_id=2, chunk_id="b:0", score=0.3),
     ])
-    results = hybrid_search(conn, vec, _fake_embedder(), "q")
+    results = hybrid_search(conn, vec, _fake_embedder(), _pq("q"))
     assert len(results) == 2
 
 
@@ -289,26 +421,111 @@ def test_chunk_dedup_with_multiple_docs() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_embed_called_with_query_text() -> None:
+def test_embed_called_with_semantic_query() -> None:
     conn = _fake_conn([])
     emb = _fake_embedder()
-    hybrid_search(conn, _fake_vec_index([]), emb, "my query")
+    hybrid_search(conn, _fake_vec_index([]), emb, _pq("my query"))
     emb.embed.assert_called_once_with(["my query"])
+
+
+def test_embed_uses_semantic_query_not_keywords() -> None:
+    conn = _fake_conn([])
+    emb = _fake_embedder()
+    hybrid_search(conn, _fake_vec_index([]), emb, _pq("machine learning", keywords=["GDPR"]))
+    emb.embed.assert_called_once_with(["machine learning"])
 
 
 def test_vector_search_called_once() -> None:
     conn = _fake_conn([])
     vec = _fake_vec_index([])
-    hybrid_search(conn, vec, _fake_embedder(), "q")
+    hybrid_search(conn, vec, _fake_embedder(), _pq("q"))
     vec.search.assert_called_once()
 
 
 def test_vector_search_called_with_candidate_limit() -> None:
     conn = _fake_conn([])
     vec = _fake_vec_index([])
-    hybrid_search(conn, vec, _fake_embedder(), "q", candidate_limit=25)
+    hybrid_search(conn, vec, _fake_embedder(), _pq("q"), candidate_limit=25)
     _, kwargs = vec.search.call_args
     assert kwargs.get("limit") == 25
+
+
+# ---------------------------------------------------------------------------
+# file_types filter
+# ---------------------------------------------------------------------------
+
+
+def test_file_types_passes_where_to_vector_search() -> None:
+    conn = _fake_conn([])
+    vec = _fake_vec_index([])
+    hybrid_search(conn, vec, _fake_embedder(), _pq("q", file_types=[".pdf", ".docx"]))
+    _, kwargs = vec.search.call_args
+    where = kwargs.get("where", "")
+    assert ".pdf" in where
+    assert ".docx" in where
+
+
+def test_file_types_where_uses_in_clause() -> None:
+    conn = _fake_conn([])
+    vec = _fake_vec_index([])
+    hybrid_search(conn, vec, _fake_embedder(), _pq("q", file_types=[".xlsx"]))
+    _, kwargs = vec.search.call_args
+    assert "IN" in (kwargs.get("where") or "")
+
+
+def test_no_file_types_passes_no_where() -> None:
+    conn = _fake_conn([])
+    vec = _fake_vec_index([])
+    hybrid_search(conn, vec, _fake_embedder(), _pq("q"))
+    _, kwargs = vec.search.call_args
+    assert kwargs.get("where") is None
+
+
+def test_file_types_allows_vec_match_through() -> None:
+    conn = _fake_conn([])
+    vec = _fake_vec_index([_vec("/report.pdf", doc_id=1)])
+    results = hybrid_search(conn, vec, _fake_embedder(), _pq("q", file_types=[".pdf"]))
+    assert len(results) == 1
+    assert results[0].path == Path("/report.pdf")
+
+
+# ---------------------------------------------------------------------------
+# date_range filter
+# ---------------------------------------------------------------------------
+
+
+def test_date_range_after_in_vec_where() -> None:
+    conn = _fake_conn([])
+    vec = _fake_vec_index([])
+    dr = DateRange(after=datetime(2024, 1, 1))
+    hybrid_search(conn, vec, _fake_embedder(), _pq("q", date_range=dr))
+    _, kwargs = vec.search.call_args
+    assert "mtime >=" in (kwargs.get("where") or "")
+
+
+def test_date_range_before_in_vec_where() -> None:
+    conn = _fake_conn([])
+    vec = _fake_vec_index([])
+    dr = DateRange(before=datetime(2025, 1, 1))
+    hybrid_search(conn, vec, _fake_embedder(), _pq("q", date_range=dr))
+    _, kwargs = vec.search.call_args
+    assert "mtime <" in (kwargs.get("where") or "")
+
+
+# ---------------------------------------------------------------------------
+# keywords
+# ---------------------------------------------------------------------------
+
+
+def test_keywords_in_fts_query_param() -> None:
+    conn = _fake_conn([])
+    hybrid_search(conn, _fake_vec_index([]), _fake_embedder(),
+                  _pq("tax documents", keywords=["GDPR"]))
+    sql_call = conn.execute.call_args_list[0]
+    params = sql_call[0][1]
+    fts_query_param = params[0]
+    assert "tax documents" in fts_query_param
+    assert "GDPR" in fts_query_param
 
 
 # ---------------------------------------------------------------------------

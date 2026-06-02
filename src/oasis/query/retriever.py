@@ -9,6 +9,7 @@ import numpy as np
 from oasis.index.embeddings import EmbeddingModel
 from oasis.index.keyword import KeywordIndex
 from oasis.index.vector import VectorIndex, VectorResult
+from oasis.query.parser import ParsedQuery
 
 RRF_K = 60
 CANDIDATE_LIMIT = 50
@@ -37,25 +38,89 @@ def _rrf(ranked_lists: list[list[str]]) -> dict[str, float]:
     return scores
 
 
+def _build_fts_query(parsed: ParsedQuery) -> str:
+    """Combine semantic_query with keywords into an FTS5 query string.
+
+    FTS5 treats space-separated terms as AND (all must match).  Multi-word
+    keywords are quoted for phrase matching.
+    """
+    parts = [parsed.semantic_query]
+    for kw in parsed.keywords:
+        parts.append(f'"{kw}"' if " " in kw else kw)
+    return " ".join(parts)
+
+
+def _build_vec_where(parsed: ParsedQuery) -> str | None:
+    """Build a LanceDB SQL WHERE clause from ParsedQuery filters."""
+    parts: list[str] = []
+
+    if parsed.file_types:
+        quoted = ", ".join(f"'{ext}'" for ext in parsed.file_types)
+        parts.append(f"extension IN ({quoted})")
+
+    if parsed.date_range:
+        dr = parsed.date_range
+        if dr.after is not None:
+            parts.append(f"mtime >= {dr.after.timestamp()}")
+        if dr.before is not None:
+            parts.append(f"mtime < {dr.before.timestamp()}")
+
+    if parsed.folders:
+        folder_conds: list[str] = []
+        for folder in parsed.folders:
+            prefix = str(Path(folder).expanduser()).rstrip("/")
+            escaped = prefix.replace("'", "''")
+            folder_conds.append(f"path LIKE '{escaped}/%'")
+        parts.append(f"({' OR '.join(folder_conds)})")
+
+    return " AND ".join(parts) if parts else None
+
+
+def _build_kw_filters(parsed: ParsedQuery) -> dict:
+    """Extract structured filters suitable for KeywordIndex.search() kwargs."""
+    filters: dict = {}
+    if parsed.date_range:
+        dr = parsed.date_range
+        if dr.after is not None:
+            filters["after"] = dr.after.timestamp()
+        if dr.before is not None:
+            filters["before"] = dr.before.timestamp()
+    if parsed.folders:
+        filters["folders"] = [str(Path(f).expanduser()) for f in parsed.folders]
+    if parsed.file_types:
+        filters["extensions"] = parsed.file_types
+    return filters
+
+
 def hybrid_search(
     conn: sqlite3.Connection,
     vector_index: VectorIndex,
     embedder: EmbeddingModel,
-    query: str,
+    parsed: ParsedQuery,
     *,
     top_n: int = DEFAULT_TOP_N,
     candidate_limit: int = CANDIDATE_LIMIT,
 ) -> list[HybridResult]:
     """Run FTS5 + vector search and fuse with Reciprocal Rank Fusion.
 
+    Uses all structured fields from *parsed*:
+    - ``semantic_query`` drives both the embedding and the FTS5 base query.
+    - ``keywords`` are appended to the FTS5 query as AND terms.
+    - ``file_types``, ``date_range``, and ``folders`` are applied as filters
+      to both the FTS5 and vector searches.
+
     Returns up to *top_n* documents ranked by fused score (descending).
     """
+    fts_query = _build_fts_query(parsed)
+    kw_filters = _build_kw_filters(parsed)
+    vec_where = _build_vec_where(parsed)
+
     # 1. BM25 via FTS5 — one result per document, ordered best-first.
-    kw_results = KeywordIndex(conn).search(query, limit=candidate_limit)
+    kw_results = KeywordIndex(conn).search(fts_query, limit=candidate_limit, **kw_filters)
 
     # 2. Semantic search — one result per chunk; deduplicate to best chunk per doc.
-    query_vec: np.ndarray = embedder.embed([query])[0]
-    vec_raw = vector_index.search(query_vec, limit=candidate_limit)
+    query_vec: np.ndarray = embedder.embed([parsed.semantic_query])[0]
+    vec_raw = vector_index.search(query_vec, limit=candidate_limit, where=vec_where)
 
     best_vec: dict[str, VectorResult] = {}
     for r in vec_raw:

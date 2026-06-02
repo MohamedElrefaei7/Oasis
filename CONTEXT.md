@@ -39,8 +39,14 @@ src/oasis/
 │   ├── pipeline.py
 │   ├── vector.py
 │   └── walker.py
+├── llm/
+│   ├── __init__.py
+│   ├── base.py
+│   ├── claude.py
+│   └── ollama.py
 └── query/
     ├── __init__.py
+    ├── parser.py
     ├── retriever.py
     ├── reranker.py
     └── snippets.py
@@ -238,7 +244,7 @@ Entry point: `oasis = "oasis:main"` in `pyproject.toml` → `__init__.py` → `a
 
 ---
 
-## Tests — 587 total, all passing
+## Tests — 815 total, all passing
 | File | Count | Covers |
 |---|---|---|
 | `test_extractors.py` | 20 | `TextExtractor` interface + extraction |
@@ -386,6 +392,120 @@ Entry point: `oasis = "oasis:main"` in `pyproject.toml` → `__init__.py` → `a
 
 ---
 
+#### NL query schema + parser — `src/oasis/query/parser.py`
+- `DateRange(BaseModel)` — `after: datetime | None`, `before: datetime | None`. Validator rejects `before <= after` when both are set.
+- `ParsedQuery(BaseModel)` — the schema the LLM fills in:
+  - `semantic_query: str` — distilled NL string for the embedding model; stripped, must be non-empty.
+  - `file_types: list[str]` — normalised to lowercase with leading dot (e.g. `"PDF"` → `".pdf"`); empty strings dropped.
+  - `date_range: DateRange | None` — optional time window; accepts dict coercion from LLM JSON.
+  - `folders: list[str]` — subtree hints mentioned by the user.
+  - `keywords: list[str]` — exact terms to feed to FTS5.
+  - `confidence: float` — LLM self-reported confidence, clamped `[0, 1]` by `ge`/`le` constraints.
+- `_SYSTEM_PROMPT` — module-level constant with field descriptions, file-type synonym mappings (powerpoint→.pptx, spreadsheet→.xlsx, etc.), relative date resolution rules (last month, last year, this year, yesterday, last week, since <month>), and 6 worked examples illustrating the full output format.
+- `parse_query(text, llm, *, today=None) -> ParsedQuery` — injects today's date into the user prompt (`"Today is {iso}.\nQuery: {text}"`), delegates to `llm.complete(prompt, ParsedQuery, system=_SYSTEM_PROMPT)`, and returns the validated `ParsedQuery` instance. `today` defaults to `date.today()`.
+
+| Decision | Reason |
+|---|---|
+| `field_validator` for extension normalisation | LLMs produce inconsistent extension formats ("PDF", "pdf", ".pdf"); normalise at parse time so callers never need to handle variants |
+| `confidence` field | Lets the caller decide whether to fall back to a simpler query if the LLM was uncertain; doesn't affect retrieval logic here |
+| `DateRange` as a nested model, not two flat fields | Keeps the datetime pair together; makes it easy to pass as a unit to a SQL `WHERE mtime BETWEEN` clause |
+| Today's date injected per-call, not baked into the system prompt | System prompt can be cached/constant; only the user message changes per request |
+| `today=None` optional override | Makes date-sensitive regression tests deterministic without monkeypatching `date.today` |
+| Six worked examples in the system prompt | LLMs follow examples more reliably than prose rules alone; examples cover all field combinations |
+
+#### LLM provider abstraction — `src/oasis/llm/`
+
+**`base.py`** — `LLMProvider(Protocol)` with `@runtime_checkable`. Single method:
+```python
+def complete(self, prompt: str, response_model: type[T], *, system: str | None = None) -> T
+```
+Both providers satisfy the Protocol structurally (no inheritance required).
+
+**`claude.py`** — `ClaudeProvider`:
+- Wraps `anthropic.Anthropic` via `instructor.from_anthropic(..., mode=ANTHROPIC_TOOLS)`.
+- Claude is given the Pydantic model's JSON schema as a tool definition; instructor validates the tool-call arguments into the Pydantic instance.
+- `DEFAULT_MODEL = "claude-sonnet-4-6"`, `DEFAULT_MAX_TOKENS = 1024`.
+- `api_key=None` → reads `ANTHROPIC_API_KEY` from environment (Anthropic SDK default behaviour).
+- `complete()` passes `model`, `messages`, `response_model`, `max_tokens` to `client.chat.completions.create()`.
+
+**`ollama.py`** — `OllamaProvider`:
+- Wraps `openai.OpenAI(base_url=..., api_key="ollama")` via `instructor.from_openai(..., mode=JSON)`.
+- JSON mode is forced explicitly so any Ollama model works regardless of tool-calling support.
+- `DEFAULT_MODEL = "llama3.2:3b"`, `DEFAULT_BASE_URL = "http://localhost:11434/v1"`.
+- `complete()` passes `model`, `messages`, `response_model` to `client.chat.completions.create()`.
+
+Both providers share a module-private `_build_messages(prompt, system)` helper.
+
+| Decision | Reason |
+|---|---|
+| `ANTHROPIC_TOOLS` mode for Claude | Most reliable structured output for Claude; instructor defines the schema as a tool and validates the call arguments |
+| `JSON` mode for Ollama, not `TOOLS` | Smaller models (3b) don't reliably use function calling; JSON mode works on any Ollama model that supports `format=json` |
+| `openai.OpenAI` client for Ollama | Ollama exposes an OpenAI-compatible API; no extra package needed |
+| `api_key="ollama"` placeholder | Ollama's API accepts any non-empty key; "ollama" is the conventional placeholder |
+| `max_tokens` only on Claude | OpenAI-compatible APIs (Ollama) don't require it; Anthropic's API does |
+| `@runtime_checkable` on Protocol | Allows `isinstance(provider, LLMProvider)` checks at runtime for guard clauses |
+| `from __future__ import annotations` | Defers annotation evaluation; consistent with rest of codebase |
+
+**Dependencies added**: `anthropic>=0.105.2`
+
+| Test file | Count | Covers |
+|---|---|---|
+| `test_llm_providers.py` | 38 | Protocol conformance, constants, construction (default/custom args, API key, mode), `complete()` (return type, single create call, response_model forwarded, messages structure with/without system, model/max_tokens passed) |
+| `test_parse_query.py` | 91 | Prompt-structure tests (system prompt contents, today date injected, query label, correct class forwarded); 25 regression cases (each validated as ParsedQuery, called once, query in prompt); prompt-engineering invariants |
+| `test_ollama_manager.py` | 22 | `_server_running` (200 → true, OSError → false), `_model_available` (in list → true, absent/error/timeout → false), `_start_server` (no binary → false, spawns correct command, devnull I/O, polls until ready, times out), `ensure_ollama` (happy path, server-not-starting → None, auto-start triggered, model-absent → None, default/custom model forwarded) |
+| `test_cli.py` (updated) | 50 | All prior tests + `ensure_ollama` called on every search, `parse_query` called with raw query text, footer shows "·  parsed" when LLM available, no "·  parsed" when Ollama unavailable, parse exception falls back gracefully |
+| `test_retriever.py` (updated) | 40 | All prior tests + `file_types` filters FTS5 results by path suffix, passes `WHERE extension IN (...)` to vector search, empty/None → no where clause, vec-only match through filter, blocked extension returns empty |
+
+#### Ollama lifecycle — `src/oasis/llm/manager.py`
+- `_server_running() -> bool` — tries `urllib.request.urlopen("http://localhost:11434/", timeout=1)`; any exception → False.
+- `_model_available(model) -> bool` — runs `ollama list` via subprocess, checks `model in stdout`; any error → False.
+- `_start_server() -> bool` — checks `shutil.which("ollama")`, spawns `ollama serve` (stdout/stderr → DEVNULL), polls `_server_running()` every 0.25 s up to `_STARTUP_TIMEOUT=5.0` s.
+- `ensure_ollama(model=DEFAULT_MODEL) -> OllamaProvider | None` — calls `_server_running()`, auto-starts if not running, checks model availability, returns `OllamaProvider` or `None` silently.
+
+#### `oasis search` — NL query parsing
+- Every search invokes `ensure_ollama()` behind a "Parsing query…" spinner.
+- If an `OllamaProvider` is returned, `parse_query(query, llm)` is called; on any exception, falls back silently to the raw query.
+- `effective_query = parsed.semantic_query` (strips file-type/date words from the query before embedding and FTS5).
+- `file_types = parsed.file_types` — passed to `hybrid_search(file_types=...)` and as a vector `WHERE` clause in semantic mode; post-filters FTS5 results in keyword mode.
+- Footer shows `·  parsed` when NL parsing succeeded.
+
+#### `hybrid_search` — `file_types` parameter
+- New optional `file_types: list[str] | None = None` parameter.
+- FTS5 results are post-filtered: `Path(r.path).suffix.lower() in file_types`.
+- Vector search receives `where=f"extension IN ({quoted})"` when `file_types` is set.
+
+| Decision | Reason |
+|---|---|
+| `ensure_ollama` returns `None` silently (no print) | Ollama being absent is a normal state — search should always work, just without NL parsing |
+| Auto-start via `ollama serve` | Users who have Ollama installed shouldn't need to remember to start it manually |
+| `_STARTUP_TIMEOUT = 5.0 s` | Enough time for a warm start; cold starts take longer but are rare once the daemon is running |
+| Post-filter FTS5 by suffix, SQL filter for vector | FTS5 doesn't have an extension column; vector index does (via `extension` column in LanceDB schema) |
+| `effective_query` replaces raw query for both FTS5 and embedding | Stripped semantic_query omits file-type/date words that confuse FTS5 stemming and embed noise |
+
+#### 4.4 – 4.7 wiring
+
+**4.4 Dateparser coercion** — `DateRange.after`/`before` now accept any string that `dateparser` can resolve (ISO dates, "January 2024", year-only, etc.) in addition to `datetime` objects. Validator calls `dateparser.parse(v, settings={RETURN_AS_TIMEZONE_AWARE: False, PREFER_DAY_OF_MONTH: first, PREFER_DATES_FROM: past})` and strips timezone info. Invalid strings raise `ValidationError`. The LLM produces concrete ISO dates; this coercion is a safety net.
+
+**4.5 Structured retrieval** — `hybrid_search()` now takes a `ParsedQuery` instead of a raw string:
+- `_build_fts_query(parsed)` — appends `parsed.keywords` to `semantic_query` (multi-word keywords quoted as phrases). FTS5 ANDs all terms.
+- `_build_vec_where(parsed)` — builds a LanceDB SQL WHERE clause from `file_types` (extension IN), `date_range` (mtime >=/<), and `folders` (path LIKE with `~` expansion).
+- `_build_kw_filters(parsed)` — extracts `after`/`before`/`folders`/`extensions` kwargs for `KeywordIndex.search()`.
+- `KeywordIndex.search()` now accepts `after`, `before`, `folders`, `extensions` keyword args; builds a dynamic parameterized WHERE clause appended to the base FTS5 query.
+- `semantic_query` drives the embedding call; all other fields are filters only.
+
+**4.6 Fallback** — `parsed` is always a valid `ParsedQuery` in the CLI. If `ensure_ollama()` returns `None` or `parse_query()` raises any exception, the code falls back to `ParsedQuery(semantic_query=raw_query)`. The search never breaks because the LLM is unavailable.
+
+**4.7 `--raw` flag** — `oasis search --raw` skips `ensure_ollama()` and `parse_query()` entirely, using the raw query string directly as `semantic_query`. Footer does not show `·  parsed`. Useful for debugging or when NL parsing overhead is unwanted.
+
+| Decision | Reason |
+|---|---|
+| `PREFER_DAY_OF_MONTH: first` for dateparser | "January 2024" should produce 2024-01-01 so the range `[Jan 1, Feb 1)` captures the whole month |
+| Always strip timezone from parsed datetimes | SQLite `mtime` is a UTC Unix timestamp; naive datetimes avoid implicit timezone arithmetic bugs |
+| `semantic_query` only for embedding, not keywords | Keywords are for exact FTS5 matching; embedding on the full FTS5 query would dilute the semantic signal |
+| `_build_*` helpers as module-level functions | The CLI imports them directly for keyword/semantic modes; keeps the logic testable in isolation |
+| `llm_parsed` bool tracks LLM usage, not ParsedQuery identity | `parsed` is never None now; only the "did the LLM actually run" flag drives the footer badge |
+| `--raw` flag instead of `--no-parse` | Positive framing — "raw mode" is a clear mental model vs. a double negative |
+
 ## Up Next
 
-- NL query parser: call Claude API to decompose a natural-language query into FTS5 keywords + optional metadata filters
+- Web UI (FastAPI + HTMX): `oasis serve` command, `/search` endpoint, result streaming

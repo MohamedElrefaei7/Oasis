@@ -44,7 +44,8 @@ def _mock_heavy_deps():
     reranker_mod._MODEL_CACHE.clear()
     with patch("oasis.index.embeddings.SentenceTransformer", return_value=fake_model), \
          patch("oasis.index.vector.lancedb.connect", return_value=mock_db), \
-         patch("oasis.query.reranker.CrossEncoder", return_value=fake_ce):
+         patch("oasis.query.reranker.CrossEncoder", return_value=fake_ce), \
+         patch("oasis.cli.app.ensure_ollama", return_value=None):
         yield
     reranker_mod._MODEL_CACHE.clear()
 
@@ -432,3 +433,125 @@ def test_search_saves_last_results(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     paths = json.loads(fake_results.read_text())
     assert len(paths) == 1
     assert paths[0].endswith("doc.txt")
+
+
+# ---------------------------------------------------------------------------
+# search — NL parsing integration
+# ---------------------------------------------------------------------------
+
+
+def test_search_calls_ensure_ollama(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    (tmp_path / "doc.txt").write_text("hello")
+    runner.invoke(app, ["index", str(tmp_path), "--db", str(db)])
+    with patch("oasis.cli.app.ensure_ollama", return_value=None) as mock_eo:
+        runner.invoke(app, ["search", "hello", "--db", str(db)])
+    mock_eo.assert_called_once()
+
+
+def test_search_uses_semantic_query_when_parsed(tmp_path: Path) -> None:
+    from oasis.query.parser import ParsedQuery
+    db = _db(tmp_path)
+    (tmp_path / "doc.txt").write_text("machine learning notes")
+    runner.invoke(app, ["index", str(tmp_path), "--db", str(db)])
+
+    fake_llm = MagicMock()
+    fake_llm.complete.return_value = ParsedQuery(
+        semantic_query="machine learning", file_types=[".pptx"]
+    )
+    with patch("oasis.cli.app.ensure_ollama", return_value=fake_llm), \
+         patch("oasis.cli.app.parse_query", return_value=ParsedQuery(
+             semantic_query="machine learning", file_types=[".pptx"]
+         )) as mock_pq:
+        runner.invoke(app, ["search", "powerpoints about ML", "--db", str(db)])
+    mock_pq.assert_called_once()
+    prompt_arg = mock_pq.call_args[0][0]
+    assert "powerpoints about ML" in prompt_arg
+
+
+def test_search_fallback_to_raw_query_when_ollama_unavailable(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    (tmp_path / "doc.txt").write_text("fox content")
+    runner.invoke(app, ["index", str(tmp_path), "--db", str(db)])
+    # ensure_ollama already returns None from the fixture — search should still work
+    result = runner.invoke(app, ["search", "fox", "--db", str(db), "--mode", "keyword"])
+    assert result.exit_code == 0
+
+
+def test_search_footer_shows_parsed_when_llm_available(tmp_path: Path) -> None:
+    from oasis.query.parser import ParsedQuery
+    db = _db(tmp_path)
+    (tmp_path / "doc.txt").write_text("quick brown fox")
+    runner.invoke(app, ["index", str(tmp_path), "--db", str(db)])
+
+    parsed = ParsedQuery(semantic_query="fox")
+    with patch("oasis.cli.app.ensure_ollama", return_value=MagicMock()), \
+         patch("oasis.cli.app.parse_query", return_value=parsed):
+        result = runner.invoke(
+            app, ["search", "fox", "--db", str(db), "--mode", "keyword"]
+        )
+    assert "parsed" in result.output
+
+
+def test_search_footer_no_parsed_label_when_llm_unavailable(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    (tmp_path / "doc.txt").write_text("quick brown fox")
+    runner.invoke(app, ["index", str(tmp_path), "--db", str(db)])
+    # fixture already patches ensure_ollama → None
+    result = runner.invoke(
+        app, ["search", "fox", "--db", str(db), "--mode", "keyword"]
+    )
+    # "·  parsed" is the footer marker; db path may contain word "parsed" so check the marker
+    assert "·  parsed" not in result.output
+
+
+def test_search_parse_exception_falls_back_gracefully(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    (tmp_path / "doc.txt").write_text("fox content")
+    runner.invoke(app, ["index", str(tmp_path), "--db", str(db)])
+    with patch("oasis.cli.app.ensure_ollama", return_value=MagicMock()), \
+         patch("oasis.cli.app.parse_query", side_effect=RuntimeError("LLM down")):
+        result = runner.invoke(
+            app, ["search", "fox", "--db", str(db), "--mode", "keyword"]
+        )
+    assert result.exit_code == 0
+
+
+# ---------------------------------------------------------------------------
+# search — --raw flag (4.7)
+# ---------------------------------------------------------------------------
+
+
+def test_search_raw_flag_skips_parsing(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    (tmp_path / "doc.txt").write_text("fox content")
+    runner.invoke(app, ["index", str(tmp_path), "--db", str(db)])
+    with patch("oasis.cli.app.ensure_ollama") as mock_eo:
+        runner.invoke(app, ["search", "fox", "--db", str(db), "--raw"])
+    mock_eo.assert_not_called()
+
+
+def test_search_raw_flag_exits_0(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    (tmp_path / "doc.txt").write_text("quick brown fox")
+    runner.invoke(app, ["index", str(tmp_path), "--db", str(db)])
+    result = runner.invoke(app, ["search", "fox", "--db", str(db), "--raw", "--mode", "keyword"])
+    assert result.exit_code == 0
+
+
+def test_search_raw_flag_no_parsed_in_footer(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    (tmp_path / "doc.txt").write_text("quick brown fox")
+    runner.invoke(app, ["index", str(tmp_path), "--db", str(db)])
+    result = runner.invoke(app, ["search", "fox", "--db", str(db), "--raw", "--mode", "keyword"])
+    assert "·  parsed" not in result.output
+
+
+def test_search_default_mode_not_raw(tmp_path: Path) -> None:
+    """Without --raw, ensure_ollama is called (mocked to None in fixture)."""
+    db = _db(tmp_path)
+    (tmp_path / "doc.txt").write_text("quick brown fox")
+    runner.invoke(app, ["index", str(tmp_path), "--db", str(db)])
+    with patch("oasis.cli.app.ensure_ollama", return_value=None) as mock_eo:
+        runner.invoke(app, ["search", "fox", "--db", str(db)])
+    mock_eo.assert_called_once()
