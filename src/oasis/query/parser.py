@@ -87,7 +87,7 @@ def parse_query(
 
     Args:
         text: Raw query string from the user.
-        llm:  Any LLMProvider (ClaudeProvider, OllamaProvider, …).
+        llm:  Any LLMProvider (e.g. OllamaProvider).
         today: Override today's date for testing; defaults to date.today().
 
     Returns:

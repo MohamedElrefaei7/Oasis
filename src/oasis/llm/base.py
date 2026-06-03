@@ -11,8 +11,7 @@ T = TypeVar("T", bound=BaseModel)
 class LLMProvider(Protocol):
     """Structural interface for LLM backends that return typed Pydantic objects.
 
-    Both sync implementations (ClaudeProvider, OllamaProvider) satisfy this
-    Protocol without inheriting from it — duck typing only.
+    OllamaProvider satisfies this Protocol without inheriting from it — duck typing only.
     """
 
     def complete(

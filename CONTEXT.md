@@ -244,7 +244,7 @@ Entry point: `oasis = "oasis:main"` in `pyproject.toml` → `__init__.py` → `a
 
 ---
 
-## Tests — 815 total, all passing
+## Tests — 794 total, all passing
 | File | Count | Covers |
 |---|---|---|
 | `test_extractors.py` | 20 | `TextExtractor` interface + extraction |
@@ -421,13 +421,6 @@ def complete(self, prompt: str, response_model: type[T], *, system: str | None =
 ```
 Both providers satisfy the Protocol structurally (no inheritance required).
 
-**`claude.py`** — `ClaudeProvider`:
-- Wraps `anthropic.Anthropic` via `instructor.from_anthropic(..., mode=ANTHROPIC_TOOLS)`.
-- Claude is given the Pydantic model's JSON schema as a tool definition; instructor validates the tool-call arguments into the Pydantic instance.
-- `DEFAULT_MODEL = "claude-sonnet-4-6"`, `DEFAULT_MAX_TOKENS = 1024`.
-- `api_key=None` → reads `ANTHROPIC_API_KEY` from environment (Anthropic SDK default behaviour).
-- `complete()` passes `model`, `messages`, `response_model`, `max_tokens` to `client.chat.completions.create()`.
-
 **`ollama.py`** — `OllamaProvider`:
 - Wraps `openai.OpenAI(base_url=..., api_key="ollama")` via `instructor.from_openai(..., mode=JSON)`.
 - JSON mode is forced explicitly so any Ollama model works regardless of tool-calling support.
@@ -438,19 +431,17 @@ Both providers share a module-private `_build_messages(prompt, system)` helper.
 
 | Decision | Reason |
 |---|---|
-| `ANTHROPIC_TOOLS` mode for Claude | Most reliable structured output for Claude; instructor defines the schema as a tool and validates the call arguments |
-| `JSON` mode for Ollama, not `TOOLS` | Smaller models (3b) don't reliably use function calling; JSON mode works on any Ollama model that supports `format=json` |
+| `JSON` mode for Ollama | Smaller models (3b) don't reliably use function calling; JSON mode works on any Ollama model that supports `format=json` |
 | `openai.OpenAI` client for Ollama | Ollama exposes an OpenAI-compatible API; no extra package needed |
 | `api_key="ollama"` placeholder | Ollama's API accepts any non-empty key; "ollama" is the conventional placeholder |
 | `max_tokens` only on Claude | OpenAI-compatible APIs (Ollama) don't require it; Anthropic's API does |
 | `@runtime_checkable` on Protocol | Allows `isinstance(provider, LLMProvider)` checks at runtime for guard clauses |
 | `from __future__ import annotations` | Defers annotation evaluation; consistent with rest of codebase |
 
-**Dependencies added**: `anthropic>=0.105.2`
 
 | Test file | Count | Covers |
 |---|---|---|
-| `test_llm_providers.py` | 38 | Protocol conformance, constants, construction (default/custom args, API key, mode), `complete()` (return type, single create call, response_model forwarded, messages structure with/without system, model/max_tokens passed) |
+| `test_llm_providers.py` | 17 | Protocol conformance, constants, construction (default/custom args, base URL, JSON mode, placeholder API key), `complete()` (return type, single create call, response_model forwarded, messages structure with/without system, model passed) |
 | `test_parse_query.py` | 91 | Prompt-structure tests (system prompt contents, today date injected, query label, correct class forwarded); 25 regression cases (each validated as ParsedQuery, called once, query in prompt); prompt-engineering invariants |
 | `test_ollama_manager.py` | 22 | `_server_running` (200 → true, OSError → false), `_model_available` (in list → true, absent/error/timeout → false), `_start_server` (no binary → false, spawns correct command, devnull I/O, polls until ready, times out), `ensure_ollama` (happy path, server-not-starting → None, auto-start triggered, model-absent → None, default/custom model forwarded) |
 | `test_cli.py` (updated) | 50 | All prior tests + `ensure_ollama` called on every search, `parse_query` called with raw query text, footer shows "·  parsed" when LLM available, no "·  parsed" when Ollama unavailable, parse exception falls back gracefully |
