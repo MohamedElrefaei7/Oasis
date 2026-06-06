@@ -1,10 +1,12 @@
 from pathlib import Path
 
+from oasis.extractors.csv import CsvExtractor
 from oasis.extractors.docx import DocxExtractor
 from oasis.extractors.pdf import PdfExtractor
 from oasis.extractors.pptx import PptxExtractor
 from oasis.extractors.registry import get_extractor
 from oasis.extractors.text import TextExtractor
+from oasis.extractors.xlsx import XlsxExtractor
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -22,8 +24,11 @@ class TestGetExtractor:
     def test_docx_returns_docx_extractor(self) -> None:
         assert isinstance(get_extractor(Path("report.docx")), DocxExtractor)
 
-    def test_xlsx_returns_none(self) -> None:
-        assert get_extractor(Path("data.xlsx")) is None
+    def test_xlsx_returns_xlsx_extractor(self) -> None:
+        assert isinstance(get_extractor(Path("data.xlsx")), XlsxExtractor)
+
+    def test_csv_returns_csv_extractor(self) -> None:
+        assert isinstance(get_extractor(Path("data.csv")), CsvExtractor)
 
     def test_pptx_returns_pptx_extractor(self) -> None:
         assert isinstance(get_extractor(Path("slides.pptx")), PptxExtractor)
@@ -74,6 +79,22 @@ class TestGetExtractor:
 
     def test_round_trip_pptx(self) -> None:
         path = FIXTURES / "sample.pptx"
+        extractor = get_extractor(path)
+        assert extractor is not None
+        doc = extractor.extract(path)
+        assert doc is not None
+        assert len(doc.text) > 0
+
+    def test_round_trip_xlsx(self) -> None:
+        path = FIXTURES / "sample.xlsx"
+        extractor = get_extractor(path)
+        assert extractor is not None
+        doc = extractor.extract(path)
+        assert doc is not None
+        assert len(doc.text) > 0
+
+    def test_round_trip_csv(self) -> None:
+        path = FIXTURES / "sample.csv"
         extractor = get_extractor(path)
         assert extractor is not None
         doc = extractor.extract(path)

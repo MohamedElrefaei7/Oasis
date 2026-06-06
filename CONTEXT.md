@@ -27,9 +27,11 @@ src/oasis/
 │   ├── base.py
 │   ├── docx.py
 │   ├── pdf.py
+│   ├── csv.py
 │   ├── pptx.py
 │   ├── registry.py
-│   └── text.py
+│   ├── text.py
+│   └── xlsx.py
 ├── index/
 │   ├── __init__.py
 │   ├── chunker.py
@@ -58,7 +60,9 @@ tests/
 │   ├── sample.md
 │   ├── sample.pdf
 │   ├── sample.pptx
-│   └── sample.txt
+│   ├── sample.csv
+│   ├── sample.txt
+│   └── sample.xlsx
 ├── test_config.py
 ├── test_docx_extractor.py
 ├── test_extractors.py
@@ -119,20 +123,40 @@ class Extractor(Protocol):
 - `language` not detected — left `None` (same as DOCX).
 - Captures `size_bytes`, `mtime`, `ctime`.
 
+#### CSV extractor — `src/oasis/extractors/csv.py`
+- Handles `.csv`.
+- Uses Python's built-in `csv` module — no new dependency.
+- Tries UTF-8 first, falls back to latin-1 on `UnicodeDecodeError`; raises `ValueError` if both fail.
+- Emits each non-empty row as tab-separated cell values, joined with `\n`.
+- No title/author/page_count available from CSV format — all left `None`.
+- Captures `size_bytes`, `mtime`, `ctime`.
+
+#### XLSX extractor — `src/oasis/extractors/xlsx.py`
+- Handles `.xlsx`.
+- Opens with `openpyxl.load_workbook(read_only=True, data_only=True)`; broad exception on open → `None` + warning.
+- Iterates all sheets; emits the sheet name as a line, then each non-empty row as tab-separated cell values.
+- Captures `title`, `author` from `wb.properties` (`.title` / `.creator`); empty string coerced to `None`.
+- Uses `page_count` to store sheet count (consistent with PPTX slide count).
+- `language` not detected — left `None`.
+- Captures `size_bytes`, `mtime`, `ctime`.
+- Calls `wb.close()` in both success and exception paths to free the read-only zip handle.
+
 #### Test fixtures — `tests/fixtures/`
 - `sample.txt`, `sample.md` — plain text, English.
 - `sample.pdf` — minimal text-native single-page PDF generated with raw bytes; pypdf extracts text and `/Title` metadata from it.
 - `sample.docx` — created with python-docx; `title="Sample Document"`, `author="Test Author"`, three paragraphs.
 - `sample.pptx` — created with python-pptx; two slides, `title="Sample Presentation"`, `author="Test Author"`.
+- `sample.xlsx` — created with openpyxl; two sheets ("Sales" with header + data rows, "Notes" with text), `title="Sample Spreadsheet"`, `creator="Oasis Test"`.
+- `sample.csv` — plain CSV; header row + four data rows with Month, Revenue, Units, Region columns.
 
-#### Tests — 87 total, all passing
+#### Tests — 797 total, all passing
 | File | Count | Covers |
 |---|---|---|
 | `test_extractors.py` | 22 | `TextExtractor` interface, `.txt`, `.md` |
 | `test_pdf_extractor.py` | 16 | `PdfExtractor` interface, success path, corrupted/scanned/missing file |
 | `test_docx_extractor.py` | 16 | `DocxExtractor` interface, success path, corrupted/missing file |
 | `test_pptx_extractor.py` | 19 | `PptxExtractor` interface, success path (all slides, slide count, metadata), corrupted/missing file |
-| `test_registry.py` | 14 | Dispatch for all registered types, `None` for unregistered, round-trips for all four formats |
+| `test_registry.py` | 17 | Dispatch for all registered types, `None` for unregistered, round-trips for all six formats |
 
 #### Config — `src/oasis/config.py`
 - `CONFIG_PATH: Path` — module-level constant pointing to `~/.config/oasis/config.toml`. Defined at module scope (not inside the class) so tests can `monkeypatch.setattr(config_module, "CONFIG_PATH", ...)` before constructing `OasisConfig()`.
