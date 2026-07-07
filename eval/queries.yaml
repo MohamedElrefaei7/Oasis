@@ -1,0 +1,671 @@
+# Oasis eval query set — 83 labeled queries against oasis-eval-corpus (301 files)
+#
+# Relevance is GRADED: 3 = the document the query is about; 2 = clearly relevant
+# alternative; 1 = marginally relevant (same topic, weaker match, or title-only match).
+# Grade >= 1 is "relevant" for binary metrics (precision@k, MRR); use grades for NDCG.
+# Documents not listed are grade 0. An empty `relevant: []` means the correct
+# behavior is returning nothing confident (scorer: count any top-3 hit as a false positive,
+# or skip these ids for averaged metrics and report them separately).
+#
+# DATE SEMANTICS: all date labels are based on file MTIME (what Oasis filters on),
+# not dates that appear in filenames or content. The corpus spreads mtimes
+# deterministically over 2019-01..2026-06 by hash of filename. Relative-date queries
+# ("last year", "recent") assume the eval runs with today ~= mid-2026; re-label if not.
+# Note the deliberate trap: meeting-notes-product-sync-YYYY-MM.docx filename dates do
+# NOT match their mtimes.
+#
+# FOLDER SEMANTICS: folders are the format directories (pdfs/, docx/, ...), so folder
+# filters overlap with type filters in this corpus. Still worth testing separately:
+# the parser must route "in the txt folder" to `folders`, not `file_types`.
+
+# ---------------------------------------------------------------- pure keyword (10)
+- id: q001
+  query: "portafilter"
+  relevant:
+    - {path: pdfs/manual-espresso-machine-em500.pdf, grade: 3}
+  tags: [keyword, pdf]
+  notes: "Rare exact term; appears only in the espresso manual."
+
+- id: q002
+  query: "denarius debasement"
+  relevant:
+    - {path: pdfs/note-roman-coinage-debasement.pdf, grade: 3}
+    - {path: pdfs/history-late-roman-administration.pdf, grade: 2}
+  tags: [keyword, pdf, near-duplicate]
+  notes: "Both Roman-economy docs mention denarius; the coinage note is the better hit."
+
+- id: q003
+  query: "coral bleaching"
+  relevant:
+    - {path: pdfs/marine-coral-reef-monitoring-2025.pdf, grade: 3}
+    - {path: pdfs/note-reef-restoration-abstract.pdf, grade: 2}
+    - {path: pptx/research-talk-coral-reefs.pptx, grade: 1}
+  tags: [keyword, cross-format]
+  notes: "pptx matches on title only ('Reef Recovery'), not the word bleaching."
+
+- id: q004
+  query: "autolyse"
+  relevant:
+    - {path: pdfs/guide-sourdough-baking.pdf, grade: 3}
+    - {path: pdfs/note-fermentation-kinetics.pdf, grade: 2}
+  tags: [keyword, pdf]
+  notes: "Verified present in both files; absent from the sourdough md note."
+
+- id: q005
+  query: "Adelie penguins"
+  relevant:
+    - {path: csv/seaborn-penguins.csv, grade: 3}
+  tags: [keyword, csv]
+  notes: "'Adelie' appears as a categorical value in the CSV body."
+
+- id: q006
+  query: "anscombe quartet"
+  relevant:
+    - {path: csv/seaborn-anscombe.csv, grade: 3}
+  tags: [keyword, csv, filename-only]
+  notes: "'anscombe' is NOT in the file content, only the filename/path. Passes only if path is searchable (it is: path is an FTS column)."
+
+- id: q007
+  query: "NTRU lattice cryptography"
+  relevant:
+    - {path: pdfs/paper-ntru-prime.pdf, grade: 3}
+    - {path: pdfs/paper-communication-theory-of-secrecy-systems.pdf, grade: 1}
+  tags: [keyword, pdf]
+  notes: "Shannon paper is marginal: cryptography, not lattices."
+
+- id: q008
+  query: "ownership borrow checker"
+  relevant:
+    - {path: md/rust-book-ownership.md, grade: 3}
+    - {path: md/rust-book-error-handling.md, grade: 1}
+    - {path: md/rust-readme.md, grade: 1}
+  tags: [keyword, md]
+
+- id: q009
+  query: "ffmpeg convert video"
+  relevant:
+    - {path: md/tldr-ffmpeg.md, grade: 3}
+  tags: [keyword, md]
+
+- id: q010
+  query: "okapi trec"
+  relevant:
+    - {path: pdfs/paper-okapi-at-trec3.pdf, grade: 3}
+  tags: [keyword, pdf, filename-only, ocr-quality]
+  notes: "Old paper with mangled text layer; 'okapi' is reliably matchable only via filename. Tests path indexing + degraded-quality docs."
+
+# ------------------------------------------------- pure semantic / paraphrase (13)
+- id: q011
+  query: "novel about hunting a white whale"
+  relevant:
+    - {path: txt/gutenberg-melville-moby_dick.txt, grade: 3}
+  tags: [semantic, txt, literature]
+  notes: "No shared keywords with the obvious FTS tokens; classic embedding win."
+
+- id: q012
+  query: "speech asking citizens to serve their country rather than be served"
+  relevant:
+    - {path: txt/inaugural-1961-Kennedy.txt, grade: 3}
+  tags: [semantic, txt, speech]
+  notes: "Paraphrase of 'ask not what your country can do for you'."
+
+- id: q013
+  query: "my coffee machine runs but no water comes out"
+  relevant:
+    - {path: pdfs/manual-espresso-machine-em500.pdf, grade: 3}
+  tags: [semantic, pdf, troubleshooting]
+  notes: "Manual's troubleshooting section covers exactly this symptom."
+
+- id: q014
+  query: "rising ocean temperatures are killing the reef"
+  relevant:
+    - {path: pdfs/marine-coral-reef-monitoring-2025.pdf, grade: 3}
+    - {path: pdfs/note-reef-restoration-abstract.pdf, grade: 2}
+    - {path: pptx/research-talk-coral-reefs.pptx, grade: 1}
+  tags: [semantic, cross-format]
+
+- id: q015
+  query: "baking bread with wild yeast at home"
+  relevant:
+    - {path: pdfs/guide-sourdough-baking.pdf, grade: 3}
+    - {path: md/notes-sourdough-attempts.md, grade: 2}
+    - {path: pdfs/note-fermentation-kinetics.pdf, grade: 2}
+    - {path: pptx/talk-sourdough-science.pptx, grade: 1}
+  tags: [semantic, cross-format]
+  notes: "Sourdough appears in 4+ formats; ranking among them is the test."
+
+- id: q016
+  query: "poetry about nature and the soul"
+  relevant:
+    - {path: txt/gutenberg-whitman-leaves.txt, grade: 3}
+    - {path: txt/gutenberg-blake-poems.txt, grade: 3}
+    - {path: txt/gutenberg-milton-paradise.txt, grade: 2}
+  tags: [semantic, txt, literature]
+
+- id: q017
+  query: "a girl falls down a rabbit hole into a strange world"
+  relevant:
+    - {path: txt/gutenberg-carroll-alice.txt, grade: 3}
+  tags: [semantic, txt, literature]
+
+- id: q018
+  query: "how to aim a stargazing scope and keep it tracking"
+  relevant:
+    - {path: pdfs/manual-telescope-astra130.pdf, grade: 3}
+    - {path: pptx/talk-telescope-buying-guide.pptx, grade: 1}
+  tags: [semantic, pdf]
+
+- id: q019
+  query: "how the city pays for roads pensions and services"
+  relevant:
+    - {path: pdfs/gov-city-comprehensive-financial-report.pdf, grade: 3}
+    - {path: pdfs/note-municipal-pension-brief.pdf, grade: 2}
+    - {path: pdfs/memo-budget-office-q3.pdf, grade: 2}
+  tags: [semantic, pdf, government]
+
+- id: q020
+  query: "data on passengers who survived a famous shipwreck"
+  relevant:
+    - {path: csv/seaborn-titanic.csv, grade: 3}
+  tags: [semantic, csv]
+
+- id: q021
+  query: "training your mind to focus in a distracting world"
+  relevant:
+    - {path: docx/essay-on-attention-and-environments.docx, grade: 3}
+    - {path: csv/seaborn-attention.csv, grade: 1}
+  tags: [semantic, docx]
+  notes: "The attention.csv is a psych experiment dataset; marginal."
+
+- id: q022
+  query: "paper explaining how image recognition networks work internally"
+  relevant:
+    - {path: pdfs/paper-Understanding-Deep-Convolutional-Networks.pdf, grade: 3}
+    - {path: md/awesome-machine-learning.md, grade: 1}
+  tags: [semantic, pdf, technical]
+
+- id: q023
+  query: "the storage system google built for structured data at scale"
+  relevant:
+    - {path: pdfs/paper-bigtable-a-distributed-storage-system-for-structured-data.pdf, grade: 3}
+    - {path: pdfs/paper-dynamo-amazons-highly-available-key-value-store.pdf, grade: 1}
+  tags: [semantic, pdf, technical, near-duplicate]
+  notes: "Dynamo is the same genre from a different company — reranker should prefer Bigtable."
+
+# ---------------------------------------------------------- file-type filter (9)
+- id: q024
+  query: "pdfs about water supply and drought"
+  relevant:
+    - {path: pdfs/gov-water-district-drought-assessment.pdf, grade: 3}
+    - {path: pdfs/memo-water-conservation.pdf, grade: 2}
+    - {path: pdfs/note-urban-water-demand.pdf, grade: 2}
+  tags: [filetype-filter, pdf]
+  notes: "brief-water-conservation.pptx must be excluded by the filter."
+
+- id: q025
+  query: "spreadsheets about household budgets"
+  relevant:
+    - {path: xlsx/budget-household-2023.xlsx, grade: 3}
+    - {path: xlsx/budget-household-2024.xlsx, grade: 3}
+    - {path: xlsx/budget-household-2025.xlsx, grade: 3}
+    - {path: xlsx/budget-department-fy2025.xlsx, grade: 1}
+  tags: [filetype-filter, xlsx]
+  notes: "Department budget is a budget but not household — marginal."
+
+- id: q026
+  query: "powerpoint about onboarding new employees"
+  relevant:
+    - {path: pptx/onboarding-week-one.pptx, grade: 3}
+  tags: [filetype-filter, pptx]
+  notes: "survey-results-onboarding.xlsx must be excluded by the filter."
+
+- id: q027
+  query: "csv of country populations"
+  relevant:
+    - {path: csv/population-by-country.csv, grade: 3}
+    - {path: csv/world-cities.csv, grade: 2}
+    - {path: csv/country-codes.csv, grade: 1}
+  tags: [filetype-filter, csv]
+
+- id: q028
+  query: "word document about parental leave policy"
+  relevant:
+    - {path: docx/policy-parental-leave.docx, grade: 3}
+  tags: [filetype-filter, docx]
+  notes: "Tests synonym mapping 'word document' -> .docx in the NL parser."
+
+- id: q029
+  query: "markdown files about the rust programming language"
+  relevant:
+    - {path: md/rust-readme.md, grade: 3}
+    - {path: md/rust-book-ownership.md, grade: 2}
+    - {path: md/rust-book-error-handling.md, grade: 2}
+    - {path: md/rust-book-concurrency.md, grade: 2}
+  tags: [filetype-filter, md]
+
+- id: q030
+  query: "text file of hamlet"
+  relevant:
+    - {path: txt/gutenberg-shakespeare-hamlet.txt, grade: 3}
+  tags: [filetype-filter, txt]
+
+- id: q031
+  query: "pdf manual for a telescope"
+  relevant:
+    - {path: pdfs/manual-telescope-astra130.pdf, grade: 3}
+  tags: [filetype-filter, pdf]
+  notes: "talk-telescope-buying-guide.pptx excluded by filter."
+
+- id: q032
+  query: "excel file tracking marathon training"
+  relevant:
+    - {path: xlsx/tracker-marathon-training-log.xlsx, grade: 3}
+  tags: [filetype-filter, xlsx]
+  notes: "notes-marathon-plan.md is topical but must be excluded by the filter."
+
+# --------------------------------------------------------------- date filter (9)
+# All based on mtime; assume eval runs with today ~= 2026-07 for relative dates.
+- id: q033
+  query: "documents about coral reefs from 2025"
+  relevant:
+    - {path: pdfs/marine-coral-reef-monitoring-2025.pdf, grade: 3}
+  tags: [date-filter, pdf]
+  notes: "note-reef-restoration (mtime 2019) and coral pptx (2021) must be excluded."
+
+- id: q034
+  query: "meeting notes from last year"
+  relevant:
+    - {path: docx/meeting-notes-product-sync-2025-11.docx, grade: 3}
+  tags: [date-filter, docx, relative-date, trap]
+  notes: "Last year = 2025 by MTIME. Only -2025-11 has a 2025 mtime (2025-08). Filename dates deliberately disagree with mtimes — a system filtering on filename dates will fail this."
+
+- id: q035
+  query: "recipes from 2019"
+  relevant:
+    - {path: pdfs/booklet-weeknight-recipes.pdf, grade: 3}
+  tags: [date-filter, pdf]
+  notes: "recipes-costing-sheet.xlsx (2022) and sourdough guide (2022) excluded by date."
+
+- id: q036
+  query: "contracts from 2023"
+  relevant:
+    - {path: docx/contract-consulting-services-v2-final.docx, grade: 3}
+    - {path: docx/contract-vendor-master-services.docx, grade: 3}
+  tags: [date-filter, docx, near-duplicate]
+  notes: "v1 of the consulting contract has mtime 2024-01 — date filter separates the near-duplicates."
+
+- id: q037
+  query: "anything from January 2026"
+  relevant:
+    - {path: pptx/all-hands-hiring-update.pptx, grade: 2}
+    - {path: xlsx/model-revenue-forecast.xlsx, grade: 2}
+    - {path: csv/country-codes.csv, grade: 2}
+    - {path: pdfs/gov-water-district-drought-assessment.pdf, grade: 2}
+  tags: [date-filter, no-topic]
+  notes: "Pure date window, no topical signal. All four in-window docs graded equally."
+
+- id: q038
+  query: "inflation or bond yield data from the last two years"
+  relevant:
+    - {path: csv/us-inflation-cpi.csv, grade: 3}
+    - {path: csv/bond-yields-us-10y.csv, grade: 3}
+  tags: [date-filter, csv, relative-date]
+  notes: "Window 2024-07..2026-07. gold-prices (2020) excluded."
+
+- id: q039
+  query: "essays written before 2021"
+  relevant:
+    - {path: docx/essay-what-cities-remember.docx, grade: 3}
+    - {path: docx/essay-in-defense-of-slowness.docx, grade: 3}
+  tags: [date-filter, docx]
+
+- id: q040
+  query: "presidential speeches from before 2020"
+  relevant:
+    - {path: txt/sotu-2002-GWBush.txt, grade: 3}
+    - {path: txt/inaugural-1905-Roosevelt.txt, grade: 3}
+    - {path: txt/sotu-1963-Kennedy.txt, grade: 3}
+  tags: [date-filter, txt, trap]
+  notes: "Filter is on mtime, not the year in the filename or the speech's actual date."
+
+- id: q041
+  query: "files about penguins updated in September 2025"
+  relevant:
+    - {path: csv/seaborn-penguins.csv, grade: 3}
+  tags: [date-filter, csv]
+
+# ------------------------------------------------------------- folder filter (6)
+- id: q042
+  query: "in the txt folder, something about a whale"
+  relevant:
+    - {path: txt/gutenberg-melville-moby_dick.txt, grade: 3}
+    - {path: txt/gutenberg-bible-kjv.txt, grade: 1}
+  tags: [folder-filter, txt]
+  notes: "KJV mentions whales/leviathan; marginal."
+
+- id: q043
+  query: "anything in the docx folder about non-disclosure agreements"
+  relevant:
+    - {path: docx/contract-nda-mutual.docx, grade: 3}
+  tags: [folder-filter, docx]
+
+- id: q044
+  query: "in the md folder, my notes about apartment hunting"
+  relevant:
+    - {path: md/notes-apartment-hunt.md, grade: 3}
+  tags: [folder-filter, md]
+
+- id: q045
+  query: "csv folder: anything about weather"
+  relevant:
+    - {path: csv/vega-seattle-weather.csv, grade: 3}
+  tags: [folder-filter, csv]
+  notes: "timeseries-rainfall-gauge.xlsx is topical but outside the folder."
+
+- id: q046
+  query: "in pdfs, the classic paper about unix"
+  relevant:
+    - {path: pdfs/paper-unix-time-sharing-system.pdf, grade: 3}
+    - {path: pdfs/paper-jails-confining-the-omnipotent-root..pdf, grade: 1}
+    - {path: pdfs/paper-solaris-zones-operating-system-support-for-consolidating-commercial-workloads.pd.pdf, grade: 1}
+  tags: [folder-filter, pdf]
+
+- id: q047
+  query: "town hall decks in the pptx folder"
+  relevant:
+    - {path: pptx/town-hall-q1-results.pptx, grade: 3}
+    - {path: pptx/town-hall-q3-results.pptx, grade: 3}
+    - {path: pptx/all-hands-hiring-update.pptx, grade: 2}
+    - {path: pptx/board-update-annual.pptx, grade: 1}
+  tags: [folder-filter, pptx, near-duplicate]
+
+# ---------------------------------------------------------- combined filters (11)
+- id: q048
+  query: "powerpoints from 2025 about money or finance"
+  relevant:
+    - {path: pptx/lecture-personal-finance-basics.pptx, grade: 3}
+    - {path: pptx/pitch-deck-freight-analytics-startup.pptx, grade: 1}
+    - {path: pptx/lecture-roman-economy.pptx, grade: 1}
+  tags: [combined, filetype-filter, date-filter, pptx]
+
+- id: q049
+  query: "excel expense reports from 2025"
+  relevant:
+    - {path: xlsx/expenses-team-offsite-final.xlsx, grade: 3}
+  tags: [combined, filetype-filter, date-filter, xlsx, near-duplicate]
+  notes: "The -draft near-duplicate has mtime 2021 — the date filter must separate them."
+
+- id: q050
+  query: "pdf government reports from 2025 or later"
+  relevant:
+    - {path: pdfs/gov-city-comprehensive-financial-report.pdf, grade: 3}
+    - {path: pdfs/gov-regional-infrastructure-assessment-long.pdf, grade: 3}
+    - {path: pdfs/gov-water-district-drought-assessment.pdf, grade: 3}
+    - {path: pdfs/gov-transit-authority-annual-report-2024.pdf, grade: 3}
+    - {path: pdfs/memo-water-conservation.pdf, grade: 2}
+    - {path: pdfs/memo-health-flu-season.pdf, grade: 2}
+    - {path: pdfs/marine-coral-reef-monitoring-2025.pdf, grade: 1}
+  tags: [combined, filetype-filter, date-filter, pdf, government]
+
+- id: q051
+  query: "presentations from 2019"
+  relevant:
+    - {path: pptx/kickoff-website-redesign.pptx, grade: 2}
+    - {path: pptx/class-photography-basics.pptx, grade: 2}
+    - {path: pptx/talk-sourdough-science.pptx, grade: 2}
+    - {path: pptx/sample-background-styles.pptx, grade: 2}
+    - {path: pptx/workshop-vector-search.pptx, grade: 2}
+  tags: [combined, filetype-filter, date-filter, pptx, no-topic]
+  notes: "Type + date, no topic. All five 2019 decks graded equally."
+
+- id: q052
+  query: "markdown docs about machine learning from 2024 or later"
+  relevant:
+    - {path: md/tensorflow-readme.md, grade: 3}
+    - {path: md/lancedb-readme.md, grade: 2}
+    - {path: md/pandas-readme.md, grade: 1}
+    - {path: md/flask-readme.md, grade: 0}
+  tags: [combined, filetype-filter, date-filter, md]
+  notes: "awesome-machine-learning (2020) and pytorch (2020) excluded by date despite strong topical match. flask listed at 0 as an explicit hard negative."
+
+- id: q053
+  query: "csv stock market data from 2020"
+  relevant:
+    - {path: csv/sp500-monthly.csv, grade: 3}
+    - {path: csv/vega-stocks.csv, grade: 3}
+    - {path: csv/nasdaq-listings.csv, grade: 2}
+    - {path: csv/gold-prices-monthly.csv, grade: 1}
+  tags: [combined, filetype-filter, date-filter, csv]
+
+- id: q054
+  query: "the final version of the consulting contract, word doc"
+  relevant:
+    - {path: docx/contract-consulting-services-v2-final.docx, grade: 3}
+    - {path: docx/contract-consulting-services-v1.docx, grade: 1}
+  tags: [combined, filetype-filter, docx, near-duplicate]
+  notes: "Reranker discrimination: 'final' should rank v2 above v1."
+
+- id: q055
+  query: "inaugural addresses added in 2024"
+  relevant:
+    - {path: txt/inaugural-1913-Wilson.txt, grade: 3}
+    - {path: txt/inaugural-1981-Reagan.txt, grade: 3}
+    - {path: txt/inaugural-2009-Obama.txt, grade: 3}
+  tags: [combined, date-filter, txt, trap]
+  notes: "'added in 2024' = mtime 2024; the years in filenames are decoys."
+
+- id: q056
+  query: "spreadsheets about sports from 2021"
+  relevant:
+    - {path: xlsx/stats-nba-team-records.xlsx, grade: 3}
+    - {path: xlsx/stats-premier-league-table.xlsx, grade: 3}
+    - {path: xlsx/tracker-marathon-training-log.xlsx, grade: 2}
+  tags: [combined, filetype-filter, date-filter, xlsx]
+
+- id: q057
+  query: "recent pdfs about fermentation"
+  relevant:
+    - {path: pdfs/note-fermentation-kinetics.pdf, grade: 3}
+    - {path: pdfs/guide-sourdough-baking.pdf, grade: 1}
+  tags: [combined, filetype-filter, relative-date, pdf]
+  notes: "'recent' ~= 2026 window: kinetics note is 2026-04; the guide (2022) only qualifies if the parser interprets 'recent' loosely — graded 1 to tolerate either."
+
+- id: q058
+  query: "docx travel plans from 2025"
+  relevant:
+    - {path: docx/travel-japan-rail-two-weeks.docx, grade: 3}
+    - {path: docx/travel-patagonia-trek-plan.docx, grade: 3}
+  tags: [combined, filetype-filter, date-filter, docx]
+  notes: "travel-lisbon (2023) excluded by date."
+
+# ------------------------------------------------------ vague / partial memory (8)
+- id: q059
+  query: "that spreadsheet with the foreign city names, some in japanese"
+  relevant:
+    - {path: xlsx/edge-unicode-cities.xlsx, grade: 3}
+    - {path: csv/world-cities.csv, grade: 1}
+  tags: [vague, xlsx, unicode]
+
+- id: q060
+  query: "the flyer with the sideways text on it"
+  relevant:
+    - {path: pdfs/weird-layout-conference-flyer.pdf, grade: 3}
+  tags: [vague, pdf, weird-formatting]
+  notes: "Hard: 'sideways' isn't in the text. Realistically matchable only via 'flyer' in filename/title."
+
+- id: q061
+  query: "the scanned inspection form from the records room"
+  relevant: []
+  mode: hybrid
+  tags: [vague, edge-case, expected-empty]
+  notes: "scanned-inspection-report.pdf has no text layer and is correctly NOT indexed. The right answer is no confident result. Report separately from averaged metrics."
+
+- id: q062
+  query: "that thing about the whale"
+  relevant:
+    - {path: txt/gutenberg-melville-moby_dick.txt, grade: 3}
+  tags: [vague, txt]
+
+- id: q063
+  query: "the deck from the big all-company meeting with the quarterly results"
+  relevant:
+    - {path: pptx/town-hall-q1-results.pptx, grade: 2}
+    - {path: pptx/town-hall-q3-results.pptx, grade: 2}
+    - {path: pptx/all-hands-hiring-update.pptx, grade: 1}
+    - {path: pptx/board-update-annual.pptx, grade: 1}
+  tags: [vague, pptx, near-duplicate]
+  notes: "Genuinely ambiguous between the two town halls; both graded 2."
+
+- id: q064
+  query: "grocery list, eggs and stuff"
+  relevant:
+    - {path: docx/edge-no-metadata-grocery-list.docx, grade: 3}
+  tags: [vague, docx, edge-case]
+  notes: "Target has no title/author metadata; content-only match."
+
+- id: q065
+  query: "the walkthrough of making a branch and merging it back"
+  relevant:
+    - {path: md/pro-git-branching.md, grade: 3}
+    - {path: md/git-readme.md, grade: 1}
+  tags: [vague, md]
+
+- id: q066
+  query: "notes from when i was troubleshooting my bread"
+  relevant:
+    - {path: md/notes-sourdough-attempts.md, grade: 3}
+    - {path: pdfs/guide-sourdough-baking.pdf, grade: 1}
+  tags: [vague, md]
+
+# ---------------------------------------------------------------- named entity (6)
+- id: q067
+  query: "books by Chesterton"
+  relevant:
+    - {path: txt/gutenberg-chesterton-ball.txt, grade: 3}
+    - {path: txt/gutenberg-chesterton-brown.txt, grade: 3}
+    - {path: txt/gutenberg-chesterton-thursday.txt, grade: 3}
+  tags: [named-entity, txt]
+
+- id: q068
+  query: "Jane Austen novels"
+  relevant:
+    - {path: txt/gutenberg-austen-emma.txt, grade: 3}
+    - {path: txt/gutenberg-austen-persuasion.txt, grade: 3}
+    - {path: txt/gutenberg-austen-sense.txt, grade: 3}
+  tags: [named-entity, txt]
+  notes: "Author name appears in the NLTK header line and the filename."
+
+- id: q069
+  query: "the Lincoln speech with malice toward none"
+  relevant:
+    - {path: txt/inaugural-1865-Lincoln.txt, grade: 3}
+    - {path: txt/inaugural-1861-Lincoln.txt, grade: 1}
+  tags: [named-entity, txt]
+  notes: "Quote verified present in the 1865 address only."
+
+- id: q070
+  query: "documents by Elena Vasquez"
+  relevant:
+    - {path: pdfs/guide-sourdough-baking.pdf, grade: 3}
+    - {path: pdfs/booklet-weeknight-recipes.pdf, grade: 3}
+    - {path: xlsx/recipes-costing-sheet.xlsx, grade: 3}
+  tags: [named-entity, metadata, expected-fail]
+  notes: "Author exists only in core-properties metadata, which is not in the FTS index (and the PDF extractor doesn't capture author at all). EXPECTED TO FAIL today — kept as a canary for author-metadata indexing."
+
+- id: q071
+  query: "files mentioning NASA"
+  relevant:
+    - {path: md/nasa-apod-api-docs.md, grade: 3}
+    - {path: md/awesome-space.md, grade: 2}
+  tags: [named-entity, md]
+
+- id: q072
+  query: "amazon's key-value store paper"
+  relevant:
+    - {path: pdfs/paper-dynamo-amazons-highly-available-key-value-store.pdf, grade: 3}
+    - {path: pdfs/paper-warp-multi-key-transactions-for-key-value-stores.pdf, grade: 1}
+    - {path: pdfs/paper-bigtable-a-distributed-storage-system-for-structured-data.pdf, grade: 1}
+  tags: [named-entity, pdf, near-duplicate]
+
+# --------------------------------------------------------- long / conversational (5)
+- id: q073
+  query: "I read a paper about a radiation therapy machine whose software bugs killed patients, pretty sure it's a pdf"
+  relevant:
+    - {path: pdfs/paper-therac.pdf, grade: 3}
+  tags: [conversational, filetype-filter, pdf]
+
+- id: q074
+  query: "there was a report from last year I think, about monitoring coral reefs over a field season, it had transect surveys in it"
+  relevant:
+    - {path: pdfs/marine-coral-reef-monitoring-2025.pdf, grade: 3}
+  tags: [conversational, relative-date, pdf]
+  notes: "mtime 2025-09; 'last year' consistent with a mid-2026 run. 'transects' verified in text."
+
+- id: q075
+  query: "looking for that old operating systems paper from the seventies, the classic one about time sharing"
+  relevant:
+    - {path: pdfs/paper-unix-time-sharing-system.pdf, grade: 3}
+    - {path: pdfs/paper-jails-confining-the-omnipotent-root..pdf, grade: 1}
+  tags: [conversational, pdf]
+
+- id: q076
+  query: "I have a spreadsheet somewhere that tracks how many seeds germinated in each garden bed"
+  relevant:
+    - {path: xlsx/tracker-garden-planting.xlsx, grade: 3}
+  tags: [conversational, filetype-filter, xlsx]
+
+- id: q077
+  query: "somewhere in my notes I wrote a sixteen week running plan that builds up to twenty mile long runs"
+  relevant:
+    - {path: md/notes-marathon-plan.md, grade: 3}
+    - {path: xlsx/tracker-marathon-training-log.xlsx, grade: 2}
+  tags: [conversational, md, cross-format]
+
+# ------------------------------------------------------------ adversarial / edge (6)
+- id: q078
+  query: "stuff"
+  relevant: []
+  tags: [adversarial, expected-empty]
+  notes: "No meaningful ground truth. Success = no crash; score separately, not in averages."
+
+- id: q079
+  query: "budget AND (2024 OR 2025)"
+  relevant:
+    - {path: xlsx/budget-household-2024.xlsx, grade: 2}
+    - {path: xlsx/budget-household-2025.xlsx, grade: 2}
+    - {path: xlsx/budget-department-fy2025.xlsx, grade: 2}
+  tags: [adversarial, boolean-syntax, xlsx]
+  notes: "Boolean-looking input. Valid FTS5, but the NL parser may strip operators; either way these budgets should surface."
+
+- id: q080
+  query: "the \"unbalanced quote budget"
+  relevant:
+    - {path: xlsx/budget-household-2024.xlsx, grade: 1}
+    - {path: xlsx/budget-department-fy2025.xlsx, grade: 1}
+    - {path: pdfs/memo-budget-office-q3.pdf, grade: 1}
+  tags: [adversarial, fts5-syntax]
+  notes: "Malformed FTS5 syntax. Keyword mode may legitimately exit with the syntax tip; hybrid/semantic must not crash and should still surface budget docs. Score keyword mode separately."
+
+- id: q081
+  query: "sordough recipy"
+  relevant:
+    - {path: pdfs/guide-sourdough-baking.pdf, grade: 3}
+    - {path: md/notes-sourdough-attempts.md, grade: 2}
+    - {path: pdfs/booklet-weeknight-recipes.pdf, grade: 1}
+  tags: [adversarial, misspelling]
+  notes: "Double misspelling defeats FTS5 stemming; embeddings should still land it."
+
+- id: q082
+  query: "東京の人口データ"
+  relevant:
+    - {path: xlsx/edge-unicode-cities.xlsx, grade: 3}
+    - {path: csv/world-cities.csv, grade: 2}
+    - {path: csv/population-by-country.csv, grade: 1}
+  tags: [adversarial, unicode, multilingual]
+  notes: "Japanese query ('Tokyo population data'). 東京 appears verbatim in edge-unicode-cities. all-MiniLM-L6-v2 is English-centric — expect weakness; this measures it."
+
+- id: q083
+  query: "file"
+  relevant: []
+  tags: [adversarial, expected-empty]
+  notes: "Ubiquitous term, no ground truth. Success = graceful behavior; exclude from averages."

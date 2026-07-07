@@ -236,6 +236,21 @@ Entry point: `oasis = "oasis:main"` in `pyproject.toml` → `__init__.py` → `a
 - Prompts for confirmation by default (`typer.confirm`, abort=True on decline)
 - Deletes the DB file plus WAL/SHM companions (`*.db-wal`, `*.db-shm`) if present
 
+#### Phase 5.1 — Evaluation harness (`eval/`)
+- **`eval/corpus/`** — 301-file labeled corpus across 7 formats (pdfs/docx/pptx/xlsx/csv/md/txt) + `MANIFEST.md`. Copied from Downloads with `cp -Rp` so **mtimes are preserved** — the corpus spreads mtimes deterministically over 2019-01..2026-06 by filename hash, which the date-filter queries depend on.
+- **`eval/queries.yaml`** — 83 labeled queries. Each: `id`, `query`, `relevant: [{path, grade}]` (graded 3/2/1; grade ≥ 1 is relevant for binary metrics, grades feed NDCG), `tags`, optional `notes`. `relevant: []` marks adversarial "expected-empty" queries.
+- **`eval/run_eval.py`** — builds a dedicated index (`eval/index/index.db` + `.lance`, gitignored) over the corpus, then for each query: parses it the same way the CLI does (`ensure_ollama()` → `parse_query`, raw fallback, fixed `today=2026-07-07`), calls `hybrid_search(top_n=20)` + `CrossEncoderReranker(top_n=10)`, maps absolute result paths back to corpus-relative keys, and scores with **ranx**.
+  - Metrics: `precision@5`, `precision@10`, `recall@10`, `mrr`, `ndcg@10`.
+  - Per-tag breakdown via qrels/run subsets; expected-empty queries reported separately (not in averages).
+  - Writes `eval/results/latest.json` (overall + by_tag + per_query + expected_empty + config + git commit) and appends `eval/results/history.jsonl` (timestamp + commit + overall) for regression tracking.
+  - Flags: `--reindex`, `--no-rerank` (score raw fusion), `--no-parse` (raw query), `--today`.
+- **`eval/plot.py`** — matplotlib chart of `ndcg@10` / `precision@5` / `mrr` over `history.jsonl` → `eval/results/metrics_over_time.png`.
+- Deps added to the `eval` group: `ranx`, `pyyaml`, `matplotlib`.
+- **First-run baseline (Ollama unavailable → raw mode, rerank on):** ndcg@10 **0.455**, mrr **0.440**, recall@10 **0.555**, precision@5 **0.188**, precision@10 **0.111**. Low precision@k is structural — most queries have a single relevant doc, capping precision@5 at 0.2; MRR/NDCG are the meaningful headline numbers.
+- **Findings surfaced by the eval (not yet fixed):**
+  - Without Ollama, queries run raw so `file_types`/`date_range`/`folders` filters never apply, and query punctuation reaches FTS5 verbatim — apostrophes/commas (`amazon's…`, q072–075/q080) throw `fts5: syntax error`, and because `hybrid_search` wraps FTS + vector in one try, the whole call fails and the semantic arm is lost too. Real robustness gap in `hybrid_search`; the harness catches `OperationalError` per-query and scores those as empty.
+  - `txt/edge-latin1-menu.txt` can't be read by the UTF-8 text extractor (skipped as failed). No query targets it, so scores are unaffected.
+
 ---
 
 ## Key Decisions
@@ -265,6 +280,13 @@ Entry point: `oasis = "oasis:main"` in `pyproject.toml` → `__init__.py` → `a
 | Walker uses `os.walk` + in-place `dirnames` pruning, not `Path.rglob` | `rglob` loads every path into memory; `os.walk` with pruning never descends into excluded dirs, saving both memory and I/O |
 | Exclusion is layered (set → dotfile → pathspec) | Set lookup is O(1); pathspec only runs after cheap guards pass, keeping the hot path fast |
 | `gitignore` pattern style instead of deprecated `gitwildmatch` | pathspec 0.12+ deprecates `gitwildmatch`; `gitignore` is the successor with identical semantics |
+| Eval calls `hybrid_search()` directly, not the CLI | Avoids subprocess overhead and exercises the real retrieval path; the reranker is applied on top exactly as the CLI's hybrid mode does |
+| Eval corpus copied with `cp -Rp` (mtimes preserved) | Date-filter queries judge relevance by mtime; the corpus encodes dates in mtimes (2019–2026), so losing them would silently break ~18 date-tagged queries |
+| Qrels/run keyed by corpus-relative POSIX paths | `queries.yaml` labels are relative (`pdfs/…`); results are absolute — normalize results via `relative_to(CORPUS_DIR)` so ranx lines them up |
+| Expected-empty queries (`relevant: []`) scored separately | ranx has no notion of "should return nothing"; averaging them would be meaningless, so they're reported as a diagnostic (num_results/top_paths) instead |
+| Empty result sets get a `{"__no_results__": 0.0}` sentinel in the run | ranx requires every qrels query to appear in the run; a grade-0 sentinel yields a clean 0 for that query without crashing |
+| Per-query FTS `OperationalError` caught and scored as empty | Adversarial/punctuation queries must not abort the whole eval; mirrors the CLI degrading to a syntax tip |
+| Dedicated eval index under `eval/index/` (gitignored) | Keeps eval reproducible and isolated from the user's real `~/.oasis` index; only metric artifacts (`latest.json`, `history.jsonl`, plot) are committed |
 
 ---
 
@@ -522,5 +544,3 @@ Both providers share a module-private `_build_messages(prompt, system)` helper.
 | `--raw` flag instead of `--no-parse` | Positive framing — "raw mode" is a clear mental model vs. a double negative |
 
 ## Up Next
-
-- Web UI (FastAPI + HTMX): `oasis serve` command, `/search` endpoint, result streaming
