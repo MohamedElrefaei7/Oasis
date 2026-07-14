@@ -209,8 +209,15 @@ def index(
         parts.append(f"[dim]{stats['unsupported']} unsupported[/dim]")
     if stats["failed"]:
         parts.append(f"[red]{stats['failed']} failed[/red]")
+    if stats["permission_denied"]:
+        parts.append(f"[yellow]{stats['permission_denied']} permission denied[/yellow]")
 
     _console.print("Done — " + "  ".join(parts))
+    if stats["permission_denied"] and not stats["indexed"]:
+        _console.print(
+            "[yellow]Nothing could be read.[/yellow] On macOS, grant Full Disk Access to your "
+            "terminal in System Settings › Privacy & Security."
+        )
     _console.print(f"[dim]db: {db_path}[/dim]")
 
 

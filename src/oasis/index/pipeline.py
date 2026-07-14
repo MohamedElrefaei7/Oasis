@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 from oasis.extractors.registry import get_extractor
 from oasis.index.chunker import Chunk, chunk_document
@@ -31,6 +32,23 @@ class _PendingDoc:
     chunks: list[Chunk]
 
 
+def _is_unreadable(path: Path) -> bool:
+    """True when *path* cannot be opened for reading at all.
+
+    The Extractor protocol requires extractors to swallow their own I/O errors
+    and return None, so a None result on its own can't distinguish "this file
+    is corrupt" from "I'm not allowed to read it" — and those need different
+    answers from the UI.  Probing costs an open() only on the failure path.
+    """
+    try:
+        with path.open("rb"):
+            return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
 def index_directory(
     conn: sqlite3.Connection,
     root: Path,
@@ -41,22 +59,52 @@ def index_directory(
     vector_index: VectorIndex | None = None,
     embedder: EmbeddingModel | None = None,
     on_chunks_progress: OnChunksProgress | None = None,
+    cancel: threading.Event | None = None,
 ) -> dict[str, int]:
+    """Walk *root*, extract and index every supported file, then embed.
+
+    Returns a stats dict whose keys are always present.  ``permission_denied``
+    is counted separately from ``failed`` so callers can tell "this file is
+    broken" apart from "I am not allowed to read this" — on macOS the latter
+    means Full Disk Access has not been granted, which is a user action, not
+    an error.
+
+    When *cancel* is set the run stops at the next file (or embedding batch)
+    and returns partial stats.  Work already committed stays committed;
+    indexing is incremental, so the next run resumes where this one stopped.
+    """
     stats: dict[str, int] = {
         "indexed": 0,
         "skipped": 0,
         "failed": 0,
         "unsupported": 0,
+        "permission_denied": 0,
         "chunks": 0,
     }
     idx = KeywordIndex(conn)
     do_embed = vector_index is not None and embedder is not None
     pending: list[_PendingDoc] = []
 
+    def on_walk_error(exc: OSError) -> None:
+        # os.walk swallows directory-level errors unless onerror is given, so
+        # without this an unreadable tree yields nothing and is indistinguishable
+        # from an empty one.  Full Disk Access denials land here, not in the
+        # per-file handlers below — the files are never yielded at all.
+        if isinstance(exc, PermissionError):
+            logger.info("Permission denied: %s", exc.filename)
+            stats["permission_denied"] += 1
+        else:
+            logger.warning("Cannot read %s: %s", exc.filename, exc.strerror)
+            stats["failed"] += 1
+
     # -----------------------------------------------------------------------
     # Phase 1: walk → extract → keyword index
     # -----------------------------------------------------------------------
-    for path in walk(root, extra_excludes=extra_excludes):
+    for path in walk(root, extra_excludes=extra_excludes, on_error=on_walk_error):
+        if cancel is not None and cancel.is_set():
+            logger.info("Indexing cancelled after %d file(s)", stats["indexed"])
+            return stats
+
         extractor = get_extractor(path)
         if extractor is None:
             stats["unsupported"] += 1
@@ -64,8 +112,16 @@ def index_directory(
                 on_file(path, "unsupported")
             continue
 
+        # PermissionError is an OSError, so it must be caught first or the
+        # broad handler below silently counts it as a generic failure.
         try:
             st = path.stat()
+        except PermissionError:
+            logger.info("Permission denied: %s", path)
+            stats["permission_denied"] += 1
+            if on_file:
+                on_file(path, "permission_denied")
+            continue
         except OSError:
             logger.warning("Cannot stat %s", path)
             stats["failed"] += 1
@@ -81,6 +137,12 @@ def index_directory(
 
         try:
             doc = extractor.extract(path)
+        except PermissionError:
+            logger.info("Permission denied: %s", path)
+            stats["permission_denied"] += 1
+            if on_file:
+                on_file(path, "permission_denied")
+            continue
         except Exception:
             logger.warning("Unexpected error extracting %s", path, exc_info=True)
             stats["failed"] += 1
@@ -89,9 +151,17 @@ def index_directory(
             continue
 
         if doc is None:
-            stats["failed"] += 1
-            if on_file:
-                on_file(path, "failed")
+            # Extractors return None for every failure mode, so probe to find
+            # out whether this was "unreadable" or genuinely "broken".
+            if _is_unreadable(path):
+                logger.info("Permission denied: %s", path)
+                stats["permission_denied"] += 1
+                if on_file:
+                    on_file(path, "permission_denied")
+            else:
+                stats["failed"] += 1
+                if on_file:
+                    on_file(path, "failed")
             continue
 
         try:
@@ -145,6 +215,10 @@ def index_directory(
         on_chunks_progress(0, total)
 
     for i in range(0, total, EMBED_BATCH):
+        if cancel is not None and cancel.is_set():
+            logger.info("Indexing cancelled after %d/%d chunk(s)", done, total)
+            return stats
+
         batch = all_items[i : i + EMBED_BATCH]
         texts = [item[1].text for item in batch]
         vectors = embedder.embed(texts)

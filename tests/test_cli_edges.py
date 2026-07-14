@@ -63,27 +63,39 @@ def _index(tmp_path: Path, db: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_search_bad_fts5_syntax_exits_1(tmp_path: Path) -> None:
+def test_search_bad_fts5_syntax_default_mode_degrades_not_fails(tmp_path: Path) -> None:
+    # Default mode is hybrid.  A malformed FTS5 expression kills only the
+    # keyword arm; the semantic arm still answers, so the search succeeds.
     db = _db(tmp_path)
     (tmp_path / "doc.txt").write_text("content")
     _index(tmp_path, db)
     result = runner.invoke(app, ["search", '"unclosed', "--db", str(db)])
-    assert result.exit_code == 1
+    assert result.exit_code == 0
 
 
-def test_search_bad_fts5_syntax_shows_tip(tmp_path: Path) -> None:
+def test_search_bad_fts5_syntax_default_mode_shows_no_error(tmp_path: Path) -> None:
     db = _db(tmp_path)
     (tmp_path / "doc.txt").write_text("content")
     _index(tmp_path, db)
     result = runner.invoke(app, ["search", '"unclosed', "--db", str(db)])
+    assert "Query error" not in result.output
+    assert "Tip:" not in result.output
+
+
+def test_search_keyword_mode_bad_fts5_shows_tip(tmp_path: Path) -> None:
+    # Keyword mode has no second arm to fall back to, so it must still report.
+    db = _db(tmp_path)
+    (tmp_path / "doc.txt").write_text("content")
+    _index(tmp_path, db)
+    result = runner.invoke(app, ["search", '"unclosed', "--db", str(db), "--mode", "keyword"])
     assert "Tip:" in result.output
 
 
-def test_search_bad_fts5_syntax_shows_query_error(tmp_path: Path) -> None:
+def test_search_keyword_mode_bad_fts5_shows_query_error(tmp_path: Path) -> None:
     db = _db(tmp_path)
     (tmp_path / "doc.txt").write_text("content")
     _index(tmp_path, db)
-    result = runner.invoke(app, ["search", '"unclosed', "--db", str(db)])
+    result = runner.invoke(app, ["search", '"unclosed', "--db", str(db), "--mode", "keyword"])
     assert "Query error" in result.output
 
 
@@ -239,12 +251,15 @@ def test_search_keyword_mode_bad_fts5_exits_1(tmp_path: Path) -> None:
     assert result.exit_code == 1
 
 
-def test_search_hybrid_mode_bad_fts5_exits_1(tmp_path: Path) -> None:
+def test_search_hybrid_mode_bad_fts5_degrades_to_semantic(tmp_path: Path) -> None:
+    # Regression: FTS and vector used to share one try block, so an FTS5 syntax
+    # error took the semantic arm down with it and the whole search returned
+    # nothing.  Hybrid must now survive a broken keyword arm.
     db = _db(tmp_path)
     (tmp_path / "doc.txt").write_text("content")
     _index(tmp_path, db)
     result = runner.invoke(app, ["search", '"unclosed', "--db", str(db), "--mode", "hybrid"])
-    assert result.exit_code == 1
+    assert result.exit_code == 0
 
 
 def test_search_semantic_mode_ignores_fts5_syntax(tmp_path: Path) -> None:

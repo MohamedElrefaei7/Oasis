@@ -1,5 +1,5 @@
 import os
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from pathlib import Path
 
 import pathspec
@@ -42,7 +42,8 @@ def walk(
     extra_excludes: list[str] | None = None,
     respect_gitignore: bool = True,
     exclude_dotfiles: bool = True,
-) -> Generator[Path, None, None]:
+    on_error: Callable[[OSError], None] | None = None,
+) -> Generator[Path]:
     """Yield every non-excluded file under root as a generator.
 
     Exclusion is applied in three layers, cheapest first:
@@ -51,6 +52,12 @@ def walk(
     2. Dotfile/dotdir skip — names starting with '.' when exclude_dotfiles=True.
     3. pathspec spec — _DEFAULT_FILE_PATTERNS + extra_excludes + the root-level
        .gitignore (when respect_gitignore=True).
+
+    *on_error* is forwarded to os.walk's ``onerror``.  Without it os.walk
+    silently swallows directory-level errors, so an unreadable tree yields
+    nothing and looks identical to an empty one — which is exactly what macOS
+    reports when Full Disk Access has not been granted.  Callers that need to
+    tell "no files" apart from "not allowed to look" must pass this.
 
     Note: only the root-level .gitignore is loaded.  Nested .gitignore files
     are not yet supported.
@@ -69,7 +76,9 @@ def walk(
 
     spec = pathspec.PathSpec.from_lines("gitignore", patterns)
 
-    for dirpath_str, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
+    for dirpath_str, dirnames, filenames in os.walk(
+        root, topdown=True, followlinks=False, onerror=on_error
+    ):
         dirpath = Path(dirpath_str)
         rel_dir = dirpath.relative_to(root)
 

@@ -25,12 +25,17 @@ def conn(tmp_path: Path) -> sqlite3.Connection:
 
 def test_returns_all_stat_keys(conn: sqlite3.Connection, tmp_path: Path) -> None:
     stats = index_directory(conn, tmp_path)
-    assert set(stats.keys()) == {"indexed", "skipped", "failed", "unsupported", "chunks"}
+    assert set(stats.keys()) == {
+        "indexed", "skipped", "failed", "unsupported", "permission_denied", "chunks",
+    }
 
 
 def test_empty_directory_all_zeros(conn: sqlite3.Connection, tmp_path: Path) -> None:
     stats = index_directory(conn, tmp_path)
-    assert stats == {"indexed": 0, "skipped": 0, "failed": 0, "unsupported": 0, "chunks": 0}
+    assert stats == {
+        "indexed": 0, "skipped": 0, "failed": 0,
+        "unsupported": 0, "permission_denied": 0, "chunks": 0,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -377,3 +382,140 @@ def test_skipped_file_not_re_embedded(
 
     index_directory(conn, tmp_path, vector_index=vec_idx, embedder=emb)
     assert emb.embed.call_count == first_embed_count  # no new embed calls
+
+
+# ---------------------------------------------------------------------------
+# permission_denied — distinct from failed
+#
+# Folded into `failed`, a Full Disk Access denial is indistinguishable from a
+# corrupt PDF, and the app can only say "indexed 0 files" instead of offering
+# the fix.  PermissionError is an OSError, so it must be caught ahead of the
+# broad handlers or it lands in `failed` silently.
+# ---------------------------------------------------------------------------
+
+
+def test_permission_denied_key_always_present(conn: sqlite3.Connection, tmp_path: Path) -> None:
+    stats = index_directory(conn, tmp_path)
+    assert stats["permission_denied"] == 0
+
+
+def test_unreadable_file_counted_as_permission_denied_not_failed(
+    conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    (tmp_path / "ok.txt").write_text("readable")
+    denied = tmp_path / "denied.txt"
+    denied.write_text("secret")
+    denied.chmod(0o000)
+    try:
+        stats = index_directory(conn, tmp_path)
+    finally:
+        denied.chmod(0o644)
+
+    assert stats["permission_denied"] == 1
+    assert stats["failed"] == 0
+    assert stats["indexed"] == 1
+
+
+def test_unreadable_directory_counted_not_silently_skipped(
+    conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    # The macOS Full Disk Access case: the denial is at the DIRECTORY level.
+    # os.walk swallows it unless onerror is wired up, so without the walker's
+    # on_error hook this returns indexed=0, permission_denied=0 — an empty
+    # index that looks identical to an empty folder.
+    (tmp_path / "ok.txt").write_text("readable")
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    (locked / "secret.txt").write_text("secret")
+    locked.chmod(0o000)
+    try:
+        stats = index_directory(conn, tmp_path)
+    finally:
+        locked.chmod(0o755)
+
+    assert stats["permission_denied"] == 1
+    assert stats["indexed"] == 1
+
+
+def test_permission_denied_reported_via_on_file(
+    conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    denied = tmp_path / "denied.txt"
+    denied.write_text("secret")
+    denied.chmod(0o000)
+    seen: list[tuple[Path, str]] = []
+    try:
+        index_directory(conn, tmp_path, on_file=lambda p, s: seen.append((p, s)))
+    finally:
+        denied.chmod(0o644)
+
+    assert ("permission_denied") in [s for _, s in seen]
+
+
+# ---------------------------------------------------------------------------
+# cancel
+# ---------------------------------------------------------------------------
+
+
+def test_cancel_before_start_indexes_nothing(
+    conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    import threading
+
+    for i in range(5):
+        (tmp_path / f"f{i}.txt").write_text(f"content {i}")
+    cancel = threading.Event()
+    cancel.set()
+
+    stats = index_directory(conn, tmp_path, cancel=cancel)
+
+    assert stats["indexed"] == 0
+
+
+def test_cancel_midway_returns_partial_stats(
+    conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    import threading
+
+    for i in range(10):
+        (tmp_path / f"f{i:02d}.txt").write_text(f"content {i}")
+    cancel = threading.Event()
+
+    def on_file(path: Path, status: str) -> None:
+        if status == "indexed":
+            cancel.set()  # stop after the very first indexed file
+
+    stats = index_directory(conn, tmp_path, cancel=cancel, on_file=on_file)
+
+    assert stats["indexed"] == 1
+    assert stats["indexed"] < 10
+
+
+def test_cancel_none_indexes_everything(conn: sqlite3.Connection, tmp_path: Path) -> None:
+    for i in range(5):
+        (tmp_path / f"f{i}.txt").write_text(f"content {i}")
+
+    stats = index_directory(conn, tmp_path, cancel=None)
+
+    assert stats["indexed"] == 5
+
+
+def test_cancel_committed_work_persists(conn: sqlite3.Connection, tmp_path: Path) -> None:
+    # Indexing is incremental — a cancelled run just means the next one resumes.
+    import threading
+
+    for i in range(10):
+        (tmp_path / f"f{i:02d}.txt").write_text(f"content {i}")
+    cancel = threading.Event()
+
+    def on_file(path: Path, status: str) -> None:
+        if status == "indexed":
+            cancel.set()
+
+    index_directory(conn, tmp_path, cancel=cancel, on_file=on_file)
+    assert KeywordIndex(conn).count() == 1
+
+    stats = index_directory(conn, tmp_path)  # resume, no cancel
+    assert stats["indexed"] == 9
+    assert stats["skipped"] == 1
+    assert KeywordIndex(conn).count() == 10

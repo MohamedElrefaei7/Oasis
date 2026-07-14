@@ -539,3 +539,91 @@ def test_default_top_n_is_ten() -> None:
 
 def test_candidate_limit_is_fifty() -> None:
     assert CANDIDATE_LIMIT == 50
+
+
+# ---------------------------------------------------------------------------
+# independent arm failure
+#
+# Regression: FTS and vector once shared a single try block, so an FTS5 syntax
+# error (an apostrophe is enough) discarded the semantic arm too and the whole
+# call returned nothing.  The arms must fail independently.
+# ---------------------------------------------------------------------------
+
+
+def _failing_conn(exc: Exception) -> MagicMock:
+    conn = MagicMock(spec=sqlite3.Connection)
+    conn.execute.side_effect = exc
+    return conn
+
+
+def test_fts_failure_degrades_to_semantic_only() -> None:
+    conn = _failing_conn(sqlite3.OperationalError("fts5: syntax error near \"'\""))
+    vec_idx = _fake_vec_index([_vec("/a.txt", doc_id=1), _vec("/b.txt", doc_id=2)])
+
+    results = hybrid_search(conn, vec_idx, _fake_embedder(), _pq("amazon's revenue"))
+
+    assert [str(r.path) for r in results] == ["/a.txt", "/b.txt"]
+
+
+def test_fts_failure_preserves_vector_order() -> None:
+    # Single-list RRF is well-defined: it just preserves that list's order.
+    conn = _failing_conn(sqlite3.OperationalError("fts5: syntax error"))
+    vec_idx = _fake_vec_index([
+        _vec("/first.txt", doc_id=1, score=0.1),
+        _vec("/second.txt", doc_id=2, score=0.2),
+        _vec("/third.txt", doc_id=3, score=0.3),
+    ])
+
+    results = hybrid_search(conn, vec_idx, _fake_embedder(), _pq("q"))
+
+    assert [str(r.path) for r in results] == ["/first.txt", "/second.txt", "/third.txt"]
+    assert results[0].score > results[-1].score
+
+
+def test_fts_failure_still_populates_result_fields() -> None:
+    conn = _failing_conn(sqlite3.OperationalError("fts5: syntax error"))
+    vec_idx = _fake_vec_index([_vec("/a.txt", doc_id=7, text="chunk body")])
+
+    (result,) = hybrid_search(conn, vec_idx, _fake_embedder(), _pq("q"))
+
+    assert result.doc_id == 7
+    assert result.snippet == "chunk body"
+    assert result.title is None
+
+
+def test_vector_failure_degrades_to_keyword_only() -> None:
+    conn = _fake_conn([_kw("/a.txt", doc_id=1), _kw("/b.txt", doc_id=2)])
+    vec_idx = MagicMock(spec=VectorIndex)
+    vec_idx.search.side_effect = RuntimeError("lance table gone")
+
+    results = hybrid_search(conn, vec_idx, _fake_embedder(), _pq("q"))
+
+    assert [str(r.path) for r in results] == ["/a.txt", "/b.txt"]
+
+
+def test_embedder_failure_degrades_to_keyword_only() -> None:
+    conn = _fake_conn([_kw("/a.txt", doc_id=1)])
+    embedder = MagicMock()
+    embedder.embed.side_effect = RuntimeError("model unloaded")
+
+    results = hybrid_search(conn, _fake_vec_index([]), embedder, _pq("q"))
+
+    assert [str(r.path) for r in results] == ["/a.txt"]
+
+
+def test_both_arms_failing_raises_the_fts_error() -> None:
+    # Nothing survived, so the caller must hear about it — and the FTS5 error
+    # is the one carrying an actionable message.
+    conn = _failing_conn(sqlite3.OperationalError("fts5: syntax error"))
+    vec_idx = MagicMock(spec=VectorIndex)
+    vec_idx.search.side_effect = RuntimeError("lance table gone")
+
+    with pytest.raises(sqlite3.OperationalError, match="fts5"):
+        hybrid_search(conn, vec_idx, _fake_embedder(), _pq("q"))
+
+
+def test_fts_failure_does_not_suppress_empty_vector_results() -> None:
+    # Both arms "succeed at returning nothing" is not an error.
+    conn = _failing_conn(sqlite3.OperationalError("fts5: syntax error"))
+
+    assert hybrid_search(conn, _fake_vec_index([]), _fake_embedder(), _pq("q")) == []

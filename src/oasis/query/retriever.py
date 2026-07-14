@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,6 +11,8 @@ from oasis.index.embeddings import EmbeddingModel
 from oasis.index.keyword import KeywordIndex
 from oasis.index.vector import VectorIndex, VectorResult
 from oasis.query.parser import ParsedQuery
+
+logger = logging.getLogger(__name__)
 
 RRF_K = 60
 CANDIDATE_LIMIT = 50
@@ -109,6 +112,13 @@ def hybrid_search(
     - ``file_types``, ``date_range``, and ``folders`` are applied as filters
       to both the FTS5 and vector searches.
 
+    The two arms fail independently.  If one raises, the other's results are
+    still returned — an FTS5 syntax error (an apostrophe in the query is
+    enough) degrades the call to semantic-only rather than losing the whole
+    search.  RRF over a single ranked list is well-defined and simply
+    preserves that list's order.  Only if *both* arms fail does this raise,
+    since then there is nothing to return.
+
     Returns up to *top_n* documents ranked by fused score (descending).
     """
     fts_query = _build_fts_query(parsed)
@@ -116,11 +126,30 @@ def hybrid_search(
     vec_where = _build_vec_where(parsed)
 
     # 1. BM25 via FTS5 — one result per document, ordered best-first.
-    kw_results = KeywordIndex(conn).search(fts_query, limit=candidate_limit, **kw_filters)
+    kw_error: Exception | None = None
+    kw_results: list = []
+    try:
+        kw_results = KeywordIndex(conn).search(fts_query, limit=candidate_limit, **kw_filters)
+    except sqlite3.OperationalError as exc:
+        # Malformed FTS5 expression (unbalanced quotes, stray punctuation).
+        # Keep the semantic arm — it never parses the query as an expression.
+        logger.warning("Keyword arm failed (%s); degrading to semantic-only", exc)
+        kw_error = exc
 
     # 2. Semantic search — one result per chunk; deduplicate to best chunk per doc.
-    query_vec: np.ndarray = embedder.embed([parsed.semantic_query])[0]
-    vec_raw = vector_index.search(query_vec, limit=candidate_limit, where=vec_where)
+    vec_error: Exception | None = None
+    vec_raw: list[VectorResult] = []
+    try:
+        query_vec: np.ndarray = embedder.embed([parsed.semantic_query])[0]
+        vec_raw = vector_index.search(query_vec, limit=candidate_limit, where=vec_where)
+    except Exception as exc:
+        logger.warning("Vector arm failed (%s); degrading to keyword-only", exc, exc_info=True)
+        vec_error = exc
+
+    if kw_error is not None and vec_error is not None:
+        # Nothing survived — re-raise the keyword error, which is the one with
+        # an actionable message (FTS5 syntax) for the caller to surface.
+        raise kw_error
 
     best_vec: dict[str, VectorResult] = {}
     for r in vec_raw:

@@ -99,7 +99,7 @@ Every component runs completely locally — embeddings, LLM, and storage. No tel
 
 | Layer | Tool |
 |---|---|
-| Language | Python 3.12+, managed with `uv` |
+| Language | Python 3.14+, managed with `uv` |
 | Keyword index | SQLite + FTS5 (BM25, porter stemmer) |
 | Vector index | LanceDB (cosine, embedded) |
 | Embeddings | `sentence-transformers/all-MiniLM-L6-v2` (384-dim) |
@@ -124,9 +124,8 @@ A few of the trade-offs that shaped the project:
 
 ## Possible Future Roadmap
 
-- **Evaluation harness** — labeled query set, precision@k / MRR / NDCG via `ranx`, run as a regression suite.
-- **Web UI** — `oasis serve` with FastAPI + HTMX for browser-based search.
-- **Native macOS app** — global hotkey, menu bar, background indexing via FSEvents, Core ML / MLX embeddings for Apple Silicon.
+- **Local HTTP API** — `oasis serve`, a loopback-only FastAPI server that the native app spawns as a child process.
+- **Native macOS app** — SwiftUI client over that API; global hotkey, menu bar, background indexing via FSEvents, Core ML / MLX embeddings for Apple Silicon.
 - **More formats** — email (`.mbox`, `.msg`), images via CLIP, code via tree-sitter.
 - **OCR fallback** for scanned PDFs.
 - **Per-directory `.gitignore` loading** (currently root-level only).
@@ -135,4 +134,4 @@ A few of the trade-offs that shaped the project:
 
 ## Current Status
 
-Active development. Extraction, keyword index, semantic layer, and natural-language query parsing are complete and tested. I'm into the polishing phase (Which consists of the web UI, evaluation harness, and packaging), as an overwhelming majority of the actual system is completed.
+Active development. Extraction, keyword index, semantic layer, natural-language query parsing, and the evaluation harness are complete and tested. I'm into the polishing phase (the local HTTP API, the native macOS client, and packaging), as an overwhelming majority of the actual system is completed.
