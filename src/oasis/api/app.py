@@ -19,6 +19,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from oasis.api.schemas import ErrorDetail, ErrorResponse, HealthResponse
+from oasis.api.search import router as search_router
 from oasis.api.state import AppState, get_conn
 from oasis.config import load_config
 from oasis.index.embeddings import SentenceTransformerEmbedder
@@ -138,9 +139,11 @@ def require_ready(request: Request) -> None:
 
 PROTECTED = [Depends(require_auth), Depends(require_ready)]
 
-# Every future endpoint (search, index, events, cancel, reset, open) attaches
-# here so auth + readiness apply by construction. /api/health stays off it.
+# Every endpoint except /api/health attaches here so auth + readiness apply by
+# construction — and it must be fully populated before create_app() runs,
+# because the catch-all registered there shadows anything added later.
 protected_router = APIRouter(prefix="/api", dependencies=PROTECTED)
+protected_router.include_router(search_router)
 
 
 # ---------------------------------------------------------------------------
@@ -186,7 +189,10 @@ async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSON
 
 
 def create_app(*, token: str, db_path: Path | None = None) -> FastAPI:
-    app = FastAPI(title="oasis", lifespan=_lifespan)
+    # openapi_url=None disables /openapi.json and both doc UIs: they enumerate
+    # every route to unauthenticated callers, and the consumer is a Swift app,
+    # not a browser. Restore locally by dropping the kwarg if ever needed.
+    app = FastAPI(title="oasis", lifespan=_lifespan, openapi_url=None)
     app.state.oasis = AppState(token=token)
     app.state.db_override = db_path
 
@@ -210,4 +216,24 @@ def create_app(*, token: str, db_path: Path | None = None) -> FastAPI:
         )
 
     app.include_router(protected_router)
+
+    def unknown_api_path() -> None:
+        raise StarletteHTTPException(
+            status_code=404,
+            detail={"code": "not_found", "message": "Not Found"},
+        )
+
+    # Auth-gated catch-all so a tokenless caller can't probe which /api routes
+    # exist: unknown paths 401 without a token and 404 only with one, same as
+    # real protected routes. No readiness gate — a 404 needs no models.
+    # MUST be registered last: Starlette matches in registration order, so any
+    # route added after this (on the app or via a later include_router) would
+    # be shadowed by it.
+    app.add_api_route(
+        "/api/{_rest:path}",
+        unknown_api_path,
+        methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
+        dependencies=[Depends(require_auth)],
+        include_in_schema=False,
+    )
     return app

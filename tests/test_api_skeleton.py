@@ -79,6 +79,13 @@ def _add_test_routes(app: FastAPI) -> None:
     app.add_api_route("/api/_echo", echo, methods=["POST"], dependencies=PROTECTED)
     app.add_api_route("/api/_boom", boom, methods=["GET"], dependencies=PROTECTED)
 
+    # create_app registers the auth-gated /api catch-all last; routes added
+    # after it (like these) would be shadowed. Move it back to the end.
+    routes = app.router.routes
+    catch_all = next(r for r in routes if getattr(r, "path", "") == "/api/{_rest:path}")
+    routes.remove(catch_all)
+    routes.append(catch_all)
+
 
 @pytest.fixture
 def ready_client(monkeypatch, tmp_path):
@@ -207,6 +214,29 @@ def test_correct_token_passes(ready_client):
     resp = ready_client.get("/api/_ping", headers=AUTH)
     assert resp.status_code == 200
     assert resp.json() == {"ok": True}
+
+
+def test_unknown_api_path_401s_without_token(ready_client):
+    # A tokenless caller must not be able to distinguish real /api routes from
+    # fake ones: unknown paths hit the auth-gated catch-all, not a bare 404.
+    resp = ready_client.get("/api/nonsense")
+    assert resp.status_code == 401
+    _assert_envelope(resp.json())
+    resp = ready_client.post("/api/also/not/real")
+    assert resp.status_code == 401
+
+
+def test_unknown_api_path_404s_with_token(ready_client):
+    resp = ready_client.get("/api/nonsense", headers=AUTH)
+    assert resp.status_code == 404
+    _assert_envelope(resp.json())
+    assert resp.json()["error"]["code"] == "not_found"
+
+
+def test_openapi_docs_disabled(ready_client):
+    # /openapi.json would enumerate every route to unauthenticated callers.
+    assert ready_client.get("/openapi.json").status_code == 404
+    assert ready_client.get("/docs").status_code == 404
 
 
 # ---------------------------------------------------------------------------

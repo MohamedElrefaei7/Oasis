@@ -7,6 +7,46 @@ from oasis.index.keyword import MATCH_END, MATCH_START
 
 SNIPPET_TOKENS = 40
 
+# A well-formed highlight span: MATCH_START … MATCH_END, shortest match.
+_SPAN_RE = re.compile(f"{MATCH_START}(.*?){MATCH_END}", flags=re.DOTALL)
+
+
+def to_segments(marked_text: str) -> list[tuple[str, bool]]:
+    """Split a MATCH_START/MATCH_END-marked string into ordered (text, match) runs.
+
+    The wire format for snippets (CLAUDE.md § Snippet format): segments, not
+    offsets. Guarantees, for any input:
+    - concatenating every text reproduces the input with sentinels stripped;
+    - no empty segments;
+    - no two adjacent segments share the same ``match`` value (merged);
+    - an unmatched string is a single ``(text, False)``; empty string → ``[]``.
+
+    Only well-formed spans count as matches; stray or unterminated sentinels
+    are stripped and their text treated as unmatched (same as the CLI's
+    renderer). Zero-gap adjacent spans merge into one matched segment, so the
+    sentinel round-trip is canonical, not byte-for-byte, for those inputs.
+    """
+    segments: list[tuple[str, bool]] = []
+
+    def emit(text: str, match: bool) -> None:
+        # A non-greedy span can still capture a nested MATCH_START; strip
+        # sentinels from every run so concatenation is exactly the de-marked input.
+        text = text.replace(MATCH_START, "").replace(MATCH_END, "")
+        if not text:
+            return
+        if segments and segments[-1][1] == match:
+            segments[-1] = (segments[-1][0] + text, match)
+        else:
+            segments.append((text, match))
+
+    pos = 0
+    for m in _SPAN_RE.finditer(marked_text):
+        emit(marked_text[pos : m.start()], False)
+        emit(m.group(1), True)
+        pos = m.end()
+    emit(marked_text[pos:], False)
+    return segments
+
 _FTS_OPERATORS = frozenset({"AND", "OR", "NOT", "NEAR"})
 _TERM_RE = re.compile(r'"[^"]*"|\b\w+\b')
 
