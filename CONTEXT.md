@@ -77,13 +77,13 @@ Do not, anywhere, claim NL parsing improves retrieval. The measured claim is the
 
 Running log of decisions, current state, and what's next. Updated with every change.
 
-Last resynced against the repo: **2026-07-14** (813 tests, all passing; git `fc43b68` + uncommitted work below).
+Last resynced against the repo: **2026-07-15** (825 tests, all passing; git `fc43b68` + uncommitted work below).
 
 ---
 
 ## Current State
 
-Phases 1–5.1 complete: extraction, keyword index, vector index, hybrid retrieval, NL query parsing, CLI, and the evaluation harness. Phase 5.2 (HTTP API) is **specced but not implemented** — see `CLAUDE.md` § HTTP API.
+Phases 1–5.1 complete: extraction, keyword index, vector index, hybrid retrieval, NL query parsing, CLI, and the evaluation harness. Phase 5.2 (HTTP API): **server skeleton implemented 2026-07-15** — handshake, model lifecycle, `/api/health`, auth, readiness gating, error envelope. The functional endpoints (`/api/search`, `/api/index`, SSE, cancel, reset, open) are still to come; see `CLAUDE.md` § HTTP API for the full spec.
 
 ### Package structure
 
@@ -93,12 +93,13 @@ src/oasis/
 ├── config.py
 ├── models.py
 ├── cli/app.py
+├── api/                 __init__, schemas, state, app, serve  ← Phase 5.2 skeleton
 ├── extractors/          base, registry, text, pdf, docx, pptx, xlsx, csv
 ├── index/               db, keyword, vector, embeddings, chunker, walker, pipeline
 ├── llm/                 __init__, base, manager, ollama
 └── query/               __init__, parser, retriever, reranker, snippets
 
-tests/                   28 test modules, 813 tests
+tests/                   29 test modules, 825 tests
 ├── fixtures/            sample.{txt,md,pdf,docx,pptx,xlsx,csv}
 eval/
 ├── corpus/              301 labeled files + MANIFEST.md
@@ -167,6 +168,18 @@ Entry: `oasis = "oasis:main"`. Default `db_path` from `load_config()`.
 | `reset` | `--yes/-y`; deletes DB + `-wal`/`-shm`. |
 
 NL parsing: every non-`--raw` search calls `ensure_ollama()` behind a spinner; on `None` or any exception, falls back to `ParsedQuery(semantic_query=query)` — search never breaks because the LLM is absent. `llm_parsed` (not `parsed is None`) drives the footer badge.
+
+### HTTP API — `api/` (skeleton only, 2026-07-15)
+
+Implements the non-endpoint half of the `CLAUDE.md` § HTTP API spec. `fastapi` + `uvicorn` added as dependencies; `httpx` added to the dev group for `TestClient`.
+
+- **`schemas.py`** — `ApiModel` base (all API schemas inherit it): wildcard `field_serializer(mode="wrap", when_used="json")` that serializes any `datetime` as UTC ISO 8601 with explicit offset (Swift's `.iso8601` decoder requires the designator; internals stay naive). `HealthResponse`, `ErrorDetail`/`ErrorResponse` (`{"error": {"code","message"}}`).
+- **`state.py`** — `AppState` dataclass: `token`, `config`, `db_path`, `embedder`, `reranker`, `vector_index` (**one shared instance, never thread-local** — comment points at the LanceDB version-pinning trap), `llm` (cached `ensure_ollama()` result, `None` included), `status: loading|ready|error`, `error`, `ready: threading.Event`. Thread-local SQLite: module-level `threading.local()` + `get_conn(db_path)` opening via `open_db()` on first use per thread; `invalidate()` bumps a generation counter so every thread reopens (reset will need it). **`get_conn` serializes `open_db()` behind a lock** — two threads opening a fresh DB concurrently race on the WAL pragma/schema DDL (`database is locked`, caught by the thread-local test); only paid on first open, never on the cached path.
+- **`app.py`** — `create_app(token=…, db_path=…)` factory. Lifespan spawns a **daemon loader thread** (never inline: Uvicorn refuses connections until lifespan returns, which would make `/api/health` connection-refused for the whole load): `load_config` → embedder → reranker → `VectorIndex` → `ensure_ollama()` once → warm both models (`embed(["warmup"])` + one dummy rerank) → `status="ready"` + set the Event; on exception, records message + `status="error"`. `GET /api/health` (no auth, always 200, reports `documents` only when ready and the DB file exists — `open_db` would otherwise *create* it as a side effect). `require_auth` (Bearer, `secrets.compare_digest`, 401) + `require_ready` (503) bundled as `PROTECTED` on `protected_router` — every future endpoint attaches there, health stays off it. Three exception handlers hold the envelope: `HTTPException` (dict details with `code`/`message` pass through, else status→code map), `RequestValidationError` (FastAPI's list-under-`detail` flattened to one message), catch-all `Exception` (logs, returns 500, never leaks the traceback).
+- **`serve.py`** — `run_serve()`: binds `127.0.0.1` itself (`port or 0` → ephemeral; reading the port back off uvicorn is racy), `secrets.token_urlsafe(32)`, prints exactly one JSON handshake line `{"port","token","pid"}` to stdout and flushes before serving, then `uvicorn.Server(...).run(sockets=[sock])` with `access_log=False` (query strings would land in the parent's stdout pipe). `--managed` (or `OASIS_MANAGED=1`, via typer `envvar`) starts the parent-death watchdog: daemon thread polling `os.getppid()` every 1s, `os._exit(0)` at ppid 1.
+- **CLI**: `oasis serve [--port N] [--db PATH] [--managed]` added to `cli/app.py` as a thin wrapper that imports `api/serve.py` *lazily*, so no other command pays the fastapi/uvicorn import.
+- **Verified live**: handshake parses as JSON, health flipped loading→ready (877 docs from the real `~/.oasis` index), unknown `/api/*` paths come back in envelope shape.
+- `[tool.pytest.ini_options]` now registers a `slow` marker (real-model tests); the API tests fake embedder/reranker/vector index so the suite never loads PyTorch.
 
 ### Config — `config.py`
 `CONFIG_PATH` is module-level (so tests can monkeypatch before construction). `OasisConfig(BaseSettings)`, `env_prefix="OASIS_"`, `db_path` default `~/.oasis/index.db`. Priority: init kwargs > env > TOML > defaults. Missing/empty TOML is fine.
@@ -246,7 +259,9 @@ The jump is entirely from splitting `hybrid_search`'s try blocks (below). 10 of 
 
 ---
 
-## Tests — 813, all passing
+## Tests — 825, all passing
+
+New 2026-07-15: `test_api_skeleton.py` (12) — loading→ready health transitions, load-failure → `status:"error"`, auth (401 envelope, missing/wrong token, health exempt), 503-while-loading envelope, **422 in envelope shape** (the FastAPI-generated one most likely to slip through), 500 envelope with no traceback leaked, thread-local SQLite (two threads, distinct connections, no `check_same_thread`), `invalidate()` reopens.
 
 | File | N | File | N | File | N |
 |---|---|---|---|---|---|
@@ -371,7 +386,7 @@ Landed ahead of the API so `api/` can be written against a stable pipeline:
 
 ## Up Next
 
-- **Implement the HTTP API** (`src/oasis/api/`) against the spec in `CLAUDE.md`. The pipeline is ready; `fastapi`/`uvicorn` still need adding.
+- **Implement the HTTP API endpoints** — the skeleton (handshake, lifecycle, health, auth, envelope) landed 2026-07-15; still to build against the `CLAUDE.md` spec: `/api/status`, `/api/search`, `/api/index` + SSE events + cancel (`jobs.py`), `/api/reset` (use `state.invalidate()` + rebuild the shared `VectorIndex`), `/api/open`, snippet segments + property test, and the search-during-index regression test. New endpoints go on `protected_router` in `api/app.py`.
 - **🔴 Make the NL filters soft, and stop distilling the embedding query.** The measured headline finding (top of Evaluation): parsing costs −0.108 ndcg@10 / −0.135 recall@10 on hybrid+CE. Two fixes, both small:
   1. **Soft filters.** `_build_vec_where` / `_build_kw_filters` turn LLM guesses into hard `WHERE` exclusions, so one wrong guess zeroes a query's recall. Convert to a post-hoc score boost so a wrong guess costs a little and a right one still helps. This is an asymmetric-payoff problem, not a prompt problem — no amount of prompt-tuning fixes it.
   2. **Embed the original query, not `semantic_query`.** Distillation produced `'civic duty'` for the JFK inaugural and `'ocean pollution'` for coral bleaching. Keep `semantic_query` for the FTS5 arm (where it genuinely helps: keyword +0.040) and give the embedder the user's actual words.
@@ -383,6 +398,9 @@ Landed ahead of the API so `api/` can be written against a stable pipeline:
 - Nested `.gitignore` support in the walker (per-directory, not just root).
 - UTF-8-only text extractor can't read latin-1 files (`edge-latin1-menu.txt` in the corpus).
 - OCR fallback for scanned PDFs.
+
+### Recently done (2026-07-15)
+- **HTTP API server skeleton** (`src/oasis/api/`): handshake, background model loading + warmup, `/api/health`, bearer auth, readiness gating, error envelope, `oasis serve` command, 12 tests. Details under "HTTP API — `api/`" above. No search/index/reset/open endpoints yet — separate commits.
 
 ### Recently done (2026-07-14)
 - **Ollama actually works now, for the first time.** Homebrew's `ollama` 0.30.0 formula ships without the `llama-server` binary — the server answers HTTP and `ollama list` works, but every inference 500s. Replaced with the `ollama-app` cask (0.32.0) and removed the formula. **Side effect to be aware of: `brew install --cask` autoremoved `mongosh` entirely** (`brew install mongosh` to restore). Note `ollama` is no longer on `PATH` — the cask only installs the CLI symlink after you click through its first-run GUI — which `manager.py` needs for `ollama list`.

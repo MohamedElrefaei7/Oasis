@@ -432,6 +432,26 @@ def reset(
 
 
 # ---------------------------------------------------------------------------
+# serve
+# ---------------------------------------------------------------------------
+
+@app.command()
+def serve(
+    port: int | None = typer.Option(None, "--port", help="Port to bind (omit or 0 for an OS-assigned ephemeral port)"),
+    db: Path | None = typer.Option(None, "--db", help="SQLite database path"),
+    managed: bool = typer.Option(
+        False, "--managed", envvar="OASIS_MANAGED",
+        help="Exit when the parent process dies (passed by the app that spawned this server)",
+    ),
+) -> None:
+    """Run the local HTTP API server (loopback only; handshake JSON on stdout)."""
+    # Lazy import: keeps fastapi/uvicorn off the import path of every other command.
+    from oasis.api.serve import run_serve
+
+    run_serve(port=port, db=db, managed=managed)
+
+
+# ---------------------------------------------------------------------------
 # open
 # ---------------------------------------------------------------------------
 
