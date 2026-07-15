@@ -17,7 +17,16 @@ runner = CliRunner()
 
 @pytest.fixture(autouse=True)
 def _mock_heavy_deps():
-    """Prevent real model loading and LanceDB I/O in CLI tests."""
+    """Prevent real model loading, LanceDB I/O, and LLM calls in CLI tests.
+
+    ``ensure_ollama`` is stubbed to None so these tests exercise the raw-query
+    path deterministically.  Without it the suite depends on whether the
+    machine happens to have a working Ollama: with one, the LLM rewrites a
+    deliberately malformed FTS5 query into a valid one and the syntax-error
+    tests silently stop testing anything.  (That is not hypothetical — these
+    tests passed for months only because the local Ollama was broken, and
+    started failing the moment it was fixed.)
+    """
     fake_model = MagicMock()
     fake_model.get_embedding_dimension.return_value = 4
     fake_model.encode.side_effect = lambda texts, **kw: np.zeros((len(texts), 4), dtype=np.float32)
@@ -45,6 +54,7 @@ def _mock_heavy_deps():
     reranker_mod._MODEL_CACHE.clear()
     with patch("oasis.index.embeddings.SentenceTransformer", return_value=fake_model), \
          patch("oasis.index.vector.lancedb.connect", return_value=mock_db), \
+         patch("oasis.cli.app.ensure_ollama", return_value=None), \
          patch("oasis.query.reranker.CrossEncoder", return_value=fake_ce):
         yield
     reranker_mod._MODEL_CACHE.clear()

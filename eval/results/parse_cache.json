@@ -1,0 +1,815 @@
+{
+  "00d3bf22e3d1a90c6bc1": {
+    "confidence": 0.95,
+    "date_range": null,
+    "file_types": [],
+    "folders": [],
+    "keywords": [
+      "citizen",
+      "country"
+    ],
+    "semantic_query": "civic duty"
+  },
+  "0143171f5de80aae4ccb": {
+    "confidence": 0.9,
+    "date_range": {
+      "after": "2025-01-01T00:00:00",
+      "before": null
+    },
+    "file_types": [
+      ".xlsx"
+    ],
+    "folders": [],
+    "keywords": [],
+    "semantic_query": "household budget documents"
+  },
+  "032bb38ff61f57b61c68": null,
+  "101bb61069ed02f8989a": {
+    "confidence": 0.8,
+    "date_range": {
+      "after": null,
+      "before": "2023-12-31T00:00:00"
+    },
+    "file_types": [
+      ".pdf"
+    ],
+    "folders": [],
+    "keywords": [
+      "contract"
+    ],
+    "semantic_query": "contracts"
+  },
+  "1306f3d802997ebe50a3": {
+    "confidence": 0.9,
+    "date_range": {
+      "after": "2021-01-01T00:00:00",
+      "before": "2022-01-01T00:00:00"
+    },
+    "file_types": [
+      ".xlsx"
+    ],
+    "folders": [],
+    "keywords": [
+      "sports"
+    ],
+    "semantic_query": "sports documents"
+  },
+  "148697ce838710ba8eaf": {
+    "confidence": 0.9,
+    "date_range": {
+      "after": null,
+      "before": "2025-01-01T00:00:00"
+    },
+    "file_types": [],
+    "folders": [],
+    "keywords": [
+      "meeting"
+    ],
+    "semantic_query": "meeting notes"
+  },
+  "16c329c0bb5c46dd4c66": {
+    "confidence": 0.85,
+    "date_range": null,
+    "file_types": [],
+    "folders": [],
+    "keywords": [
+      "reef"
+    ],
+    "semantic_query": "ocean pollution"
+  },
+  "1a8957356c330a876694": {
+    "confidence": 0.85,
+    "date_range": null,
+    "file_types": [],
+    "folders": [],
+    "keywords": [],
+    "semantic_query": "borrow checker"
+  },
+  "1b303e82928090d6ede3": {
+    "confidence": 0.9,
+    "date_range": null,
+    "file_types": [],
+    "folders": [],
+    "keywords": [],
+    "semantic_query": "hunting white whale"
+  },
+  "22d318e9950216b25e54": {
+    "confidence": 0.75,
+    "date_range": {
+      "after": "2025-01-01T00:00:00",
+      "before": null
+    },
+    "file_types": [],
+    "folders": [],
+    "keywords": [
+      "annual"
+    ],
+    "semantic_query": "budget of an annual period"
+  },
+  "239e357e412950e16ef8": {
+    "confidence": 0.8,
+    "date_range": null,
+    "file_types": [],
+    "folders": [],
+    "keywords": [
+      "government"
+    ],
+    "semantic_query": "how city government finances public services"
+  },
+  "24e50d7d635957297d9d": {
+    "confidence": 0.7,
+    "date_range": null,
+    "file_types": [],
+    "folders": [],
+    "keywords": [],
+    "semantic_query": "population data"
+  },
+  "26eda59513e365b7aac9": null,
+  "28d7445f6076fec011cd": {
+    "confidence": 0.95,
+    "date_range": null,
+    "file_types": [],
+    "folders": [
+      "~/Documents/md"
+    ],
+    "keywords": [],
+    "semantic_query": "apartment hunting notes"
+  },
+  "2b0533caeaef4b4947ca": {
+    "confidence": 0.92,
+    "date_range": null,
+    "file_types": [],
+    "folders": [],
+    "keywords": [],
+    "semantic_query": "nature and the soul"
+  },
+  "2b613e41ef0008e783ad": {
+    "confidence": 0.95,
+    "date_range": null,
+    "file_types": [],
+    "folders": [],
+    "keywords": [
+      "paper"
+    ],
+    "semantic_query": "key value store"
+  },
+  "2c45b91e422c71b41f95": {
+    "confidence": 0.9,
+    "date_range": null,
+    "file_types": [],
+    "folders": [],
+    "keywords": [
+      "wild yeast"
+    ],
+    "semantic_query": "baking bread"
+  },
+  "3127dcb6a7a4a84223be": {
+    "confidence": 0.85,
+    "date_range": {
+      "after": "2025-09-01T00:00:00",
+      "before": null
+    },
+    "file_types": [
+      ".txt"
+    ],
+    "folders": [],
+    "keywords": [
+      "up to date",
+      "current"
+    ],
+    "semantic_query": "penguin documentation"
+  },
+  "35e1d99c381f4f06fcc3": {
+    "confidence": 0.95,
+    "date_range": null,
+    "file_types": [],
+    "folders": [],
+    "keywords": [],
+    "semantic_query": "Jane Austen novels"
+  },
+  "393d33d2c0919545e6aa": {
+    "confidence": 0.9,
+    "date_range": null,
+    "file_types": [
+      ".docx"
+    ],
+    "folders": [
+      "in ~/Documents",
+      "from the docx folder"
+    ],
+    "keywords": [],
+    "semantic_query": "non-disclosure agreements"
+  },
+  "3fa352d2fdb0d88c188c": {
+    "confidence": 0.9,
+    "date_range": null,
+    "file_types": [],
+    "folders": [],
+    "keywords": [
+      "quote"
+    ],
+    "semantic_query": "budget quotes"
+  },
+  "420ffeab07180141629f": null,
+  "42b8c6d609679c69f225": {
+    "confidence": 0.9,
+    "date_range": null,
+    "file_types": [],
+    "folders": [],
+    "keywords": [],
+    "semantic_query": "NTRU lattice cryptography"
+  },
+  "48679709d45430ce3f6c": {
+    "confidence": 0.7,
+    "date_range": null,
+    "file_types": [],
+    "folders": [],
+    "keywords": [],
+    "semantic_query": "stuff"
+  },
+  "4a3cf42533ffd449e616": {
+    "confidence": 0.9,
+    "date_range": null,
+    "file_types": [],
+    "folders": [],
+    "keywords": [
+      "books"
+    ],
+    "semantic_query": "Chesterton"
+  },
+  "4e89a995e9cd3446c4cb": {
+    "confidence": 0.91,
+    "date_range": null,
+    "file_types": [],
+    "folders": [],
+    "keywords": [
+      "deck"
+    ],
+    "semantic_query": "quarterly results"
+  },
+  "517722d827a63832a7c8": {
+    "confidence": 0.95,
+    "date_range": null,
+    "file_types": [
+      ".pdf"
+    ],
+    "folders": [],
+    "keywords": [
+      "drought",
+      "water supply"
+    ],
+    "semantic_query": "water supply"
+  },
+  "518ed834ba0934c4bd33": {
+    "confidence": 0.9,
+    "date_range": {
+      "after": null,
+      "before": "2019-01-01T00:00:00"
+    },
+    "file_types": [],
+    "folders": [],
+    "keywords": [],
+    "semantic_query": "recipes"
+  },
+  "537691650ec6f8442bf2": {
+    "confidence": 0.95,
+    "date_range": null,
+    "file_types": [],
+    "folders": [],
+    "keywords": [],
+    "semantic_query": "hamlet"
+  },
+  "57a422650b1071311e16": {
+    "confidence": 0.95,
+    "date_range": null,
+    "file_types": [],
+    "folders": [],
+    "keywords": [],
+    "semantic_query": "sourdough recipe"
+  },
+  "58b8c48399a8c341c72e": {
+    "confidence": 0.0,
+    "date_range": null,
+    "file_types": [],
+    "folders": [],
+    "keywords": [],
+    "semantic_query": "unknown"
+  },
+  "5aba42730bb99e329381": {
+    "confidence": 0.8,
+    "date_range": null,
+    "file_types": [],
+    "folders": [],
+    "keywords": [],
+    "semantic_query": "coral bleaching"
+  },
+  "5fa508218594c7737545": {
+    "confidence": 0.9,
+    "date_range": null,
+    "file_types": [
+      ".txt"
+    ],
+    "folders": [
+      "in ~/txt"
+    ],
+    "keywords": [],
+    "semantic_query": "whale"
+  },
+  "64f39542a6127cd1d778": {
+    "confidence": 1.0,
+    "date_range": {
+      "after": "2020-01-01T00:00:00",
+      "before": "2026-07-07T00:00:00"
+    },
+    "file_types": [
+      ".csv"
+    ],
+    "folders": [],
+    "keywords": [],
+    "semantic_query": "stock market data"
+  },
+  "6557c3d644af1fbdad5e": {
+    "confidence": 0.85,
+    "date_range": null,
+    "file_types": [],
+    "folders": [],
+    "keywords": [
+      "foreign",
+      "city",
+      "japanese"
+    ],
+    "semantic_query": "spreadsheet documents"
+  },
+  "71d364cf04a5ded74722": {
+    "confidence": 0.85,
+    "date_range": null,
+    "file_types": [
+      ".pdf"
+    ],
+    "folders": [
+      ""
+    ],
+    "keywords": [
+      "telescope"
+    ],
+    "semantic_query": "telescope manual"
+  },
+  "77fba5ee9bc80d402f19": {
+    "confidence": 0.9,
+    "date_range": null,
+    "file_types": [],
+    "folders": [],
+    "keywords": [
+      "bread"
+    ],
+    "semantic_query": "troubleshooting bread"
+  },
+  "7aeb5c3591a2e41cdcad": null,
+  "7dabd600a2106b0f937c": {
+    "confidence": 0.95,
+    "date_range": null,
+    "file_types": [],
+    "folders": [],
+    "keywords": [
+      "passengers",
+      "shipwreck"
+    ],
+    "semantic_query": "shipwrecks survivors"
+  },
+  "80b3e1f1b192d6ccd072": {
+    "confidence": 0.65,
+    "date_range": null,
+    "file_types": [],
+    "folders": [],
+    "keywords": [],
+    "semantic_query": "portafilter"
+  },
+  "8292f7e01e9eed8ef914": {
+    "confidence": 0.9,
+    "date_range": {
+      "after": null,
+      "before": "2025-12-31T00:00:00"
+    },
+    "file_types": [
+      ".docx"
+    ],
+    "folders": [],
+    "keywords": [
+      "travel",
+      "plans"
+    ],
+    "semantic_query": "travel documents"
+  },
+  "82d6ff1d039a046093b2": null,
+  "8436c665acb3ef1ceef7": null,
+  "8520e2d149f2037bd393": {
+    "confidence": 0.95,
+    "date_range": null,
+    "file_types": [],
+    "folders": [],
+    "keywords": [],
+    "semantic_query": "excel file tracking marathon training"
+  },
+  "889bd9aba161ed5fad64": {
+    "confidence": 0.95,
+    "date_range": null,
+    "file_types": [],
+    "folders": [],
+    "keywords": [],
+    "semantic_query": "debasement"
+  },
+  "8ac0ac385247d820f533": {
+    "confidence": 0.9,
+    "date_range": null,
+    "file_types": [],
+    "folders": [],
+    "keywords": [
+      "Alice",
+      "girl"
+    ],
+    "semantic_query": "Alice's fall"
+  },
+  "930b3d644373102d1f74": {
+    "confidence": 0.95,
+    "date_range": {
+      "after": "2025-01-01T00:00:00",
+      "before": "2026-06-30T23:59:59"
+    },
+    "file_types": [
+      ".pptx"
+    ],
+    "folders": [],
+    "keywords": [
+      "money",
+      "finance"
+    ],
+    "semantic_query": "finance documents"
+  },
+  "934cdd679ad14b337edc": {
+    "confidence": 0.4,
+    "date_range": null,
+    "file_types": [],
+    "folders": [],
+    "keywords": [],
+    "semantic_query": "okapi trec"
+  },
+  "9614b4b1ecceb66439dc": {
+    "confidence": 0.7,
+    "date_range": null,
+    "file_types": [],
+    "folders": [],
+    "keywords": [
+      "flyer"
+    ],
+    "semantic_query": "flyer"
+  },
+  "9d2df465f26c86ecbd29": {
+    "confidence": 0.5,
+    "date_range": null,
+    "file_types": [],
+    "folders": [],
+    "keywords": [],
+    "semantic_query": "file"
+  },
+  "9d70b89e26e704ed543a": {
+    "confidence": 0.9,
+    "date_range": null,
+    "file_types": [],
+    "folders": [],
+    "keywords": [],
+    "semantic_query": "autolyse"
+  },
+  "9ef761f712f608ff370c": {
+    "confidence": 1.0,
+    "date_range": null,
+    "file_types": [],
+    "folders": [],
+    "keywords": [
+      "NASA"
+    ],
+    "semantic_query": "NASA"
+  },
+  "9f254dfc604b4d3c55af": null,
+  "a046708a6184e79e895d": {
+    "confidence": 0.65,
+    "date_range": null,
+    "file_types": [],
+    "folders": [],
+    "keywords": [
+      "thing"
+    ],
+    "semantic_query": "whale"
+  },
+  "a154ba0b4ff37854fc76": {
+    "confidence": 0.85,
+    "date_range": null,
+    "file_types": [
+      ".pdf"
+    ],
+    "folders": [],
+    "keywords": [
+      "paper",
+      "unix"
+    ],
+    "semantic_query": "unix"
+  },
+  "a379de8393165a6418b0": {
+    "confidence": 0.9,
+    "date_range": null,
+    "file_types": [],
+    "folders": [],
+    "keywords": [
+      "image recognition"
+    ],
+    "semantic_query": "image recognition"
+  },
+  "a59e5f9a47f9c2822aab": {
+    "confidence": 0.9,
+    "date_range": {
+      "after": "2026-06-30T00:00:00",
+      "before": null
+    },
+    "file_types": [
+      ".pptx"
+    ],
+    "folders": [],
+    "keywords": [
+      "onboarding",
+      "new",
+      "employees",
+      "powerpoint"
+    ],
+    "semantic_query": "onboarding new employees"
+  },
+  "a8c40a2a36f578bce442": {
+    "confidence": 1.0,
+    "date_range": null,
+    "file_types": [
+      ".docx"
+    ],
+    "folders": [],
+    "keywords": [
+      "leave",
+      "policy"
+    ],
+    "semantic_query": "parental leave policy documents"
+  },
+  "a9804f05899ac1c018b7": {
+    "confidence": 1.0,
+    "date_range": null,
+    "file_types": [],
+    "folders": [],
+    "keywords": [],
+    "semantic_query": "anscombe quartet"
+  },
+  "af22b8c9217e7d24d2ec": null,
+  "b60f98302a88271c00ae": {
+    "confidence": 0.9,
+    "date_range": null,
+    "file_types": [],
+    "folders": [],
+    "keywords": [],
+    "semantic_query": "adelie penguins"
+  },
+  "b61e5a9c7eaf414f6b46": null,
+  "bd88652bfbf591916e38": {
+    "confidence": 0.95,
+    "date_range": {
+      "after": "2023-01-01T00:00:00",
+      "before": "2025-06-30T00:00:00"
+    },
+    "file_types": [
+      ".pdf"
+    ],
+    "folders": [],
+    "keywords": [
+      "fermentation"
+    ],
+    "semantic_query": "fermentation documents"
+  },
+  "be14e151243f084521fa": {
+    "confidence": 1.0,
+    "date_range": null,
+    "file_types": [
+      ".txt"
+    ],
+    "folders": [],
+    "keywords": [
+      "storage"
+    ],
+    "semantic_query": "structured data"
+  },
+  "c378302f633cb9a06863": {
+    "confidence": 0.8,
+    "date_range": {
+      "after": null,
+      "before": "2025-07-01T00:00:00"
+    },
+    "file_types": [
+      ".pdf"
+    ],
+    "folders": [],
+    "keywords": [
+      "reef",
+      "monitoring"
+    ],
+    "semantic_query": "coral reef monitoring"
+  },
+  "c99238248ea8ead38d9a": {
+    "confidence": 1.0,
+    "date_range": null,
+    "file_types": [
+      ".csv"
+    ],
+    "folders": [
+      "folder: anything about weather"
+    ],
+    "keywords": [],
+    "semantic_query": "weather reports"
+  },
+  "cf704075425a837dbc20": null,
+  "d4b484357fa043a136a2": {
+    "confidence": 0.95,
+    "date_range": {
+      "after": "2024-01-01T00:00:00",
+      "before": null
+    },
+    "file_types": [
+      ".md"
+    ],
+    "folders": [],
+    "keywords": [
+      "markdown",
+      "machine learning"
+    ],
+    "semantic_query": "machine learning documentation"
+  },
+  "d4fa5a282c9102c1525e": {
+    "confidence": 1.0,
+    "date_range": null,
+    "file_types": [
+      ".docx"
+    ],
+    "folders": [],
+    "keywords": [
+      "contract"
+    ],
+    "semantic_query": "consulting contract"
+  },
+  "d88562b0c489581f019a": {
+    "confidence": 0.95,
+    "date_range": null,
+    "file_types": [],
+    "folders": [],
+    "keywords": [
+      "focus"
+    ],
+    "semantic_query": "training focus"
+  },
+  "db7ee9502e9a73c8efec": {
+    "confidence": 0.75,
+    "date_range": {
+      "after": null,
+      "before": "2025-01-01T00:00:00"
+    },
+    "file_types": [
+      ".txt",
+      ".csv"
+    ],
+    "folders": [],
+    "keywords": [
+      "inflation",
+      "yield",
+      "bond"
+    ],
+    "semantic_query": "inflation or bond yield"
+  },
+  "e164b51d7589acb097f0": null,
+  "e474a6d402499afb915d": {
+    "confidence": 0.95,
+    "date_range": null,
+    "file_types": [],
+    "folders": [],
+    "keywords": [
+      "Records",
+      "Inspection Form"
+    ],
+    "semantic_query": "scanned inspection form"
+  },
+  "e535109c430c2d182847": {
+    "confidence": 0.9,
+    "date_range": null,
+    "file_types": [],
+    "folders": [],
+    "keywords": [
+      "eggs"
+    ],
+    "semantic_query": "grocery"
+  },
+  "e56c3bd95cc7b21015a4": {
+    "confidence": 0.8,
+    "date_range": {
+      "after": "2019-07-03T00:00:00",
+      "before": null
+    },
+    "file_types": [],
+    "folders": [],
+    "keywords": [
+      "speeches",
+      "presidenital"
+    ],
+    "semantic_query": "presidential speeches"
+  },
+  "e5c1957ec09f3baa6fa3": {
+    "confidence": 0.85,
+    "date_range": {
+      "after": null,
+      "before": "2019-01-01T00:00:00"
+    },
+    "file_types": [],
+    "folders": [],
+    "keywords": [],
+    "semantic_query": "documents"
+  },
+  "eb87d9c643d3d4e9e82c": {
+    "confidence": 0.95,
+    "date_range": null,
+    "file_types": [],
+    "folders": [],
+    "keywords": [
+      "malice",
+      "toward",
+      "none"
+    ],
+    "semantic_query": "the lincoln speech"
+  },
+  "ebadb22fcba94467f5f6": null,
+  "eca871fbf680ea1fa8a6": {
+    "confidence": 0.0,
+    "date_range": null,
+    "file_types": [],
+    "folders": [],
+    "keywords": [
+      "expenses"
+    ],
+    "semantic_query": "expense reports"
+  },
+  "f1396b2f79caabb896a3": {
+    "confidence": 0.85,
+    "date_range": null,
+    "file_types": [
+      ".csv"
+    ],
+    "folders": [],
+    "keywords": [
+      "population",
+      "country"
+    ],
+    "semantic_query": "country population statistics"
+  },
+  "f1edf5d4a6d5dabefbb5": {
+    "confidence": 0.8,
+    "date_range": null,
+    "file_types": [
+      ".pdf"
+    ],
+    "folders": [],
+    "keywords": [
+      "rigs",
+      "software bugs",
+      "patients",
+      "therapy",
+      "machine",
+      "researcher",
+      "radiation therapy"
+    ],
+    "semantic_query": "radiation therapy machine"
+  },
+  "f8964d0c25a986658688": {
+    "confidence": 0.9,
+    "date_range": null,
+    "file_types": [
+      ".mp4",
+      ".mov",
+      ".avi"
+    ],
+    "folders": [],
+    "keywords": [
+      "convert"
+    ],
+    "semantic_query": "video conversion"
+  },
+  "fc36f2e6d2b1f6b8a137": {
+    "confidence": 0.85,
+    "date_range": {
+      "after": null,
+      "before": "2021-01-01T00:00:00"
+    },
+    "file_types": [],
+    "folders": [],
+    "keywords": [
+      "written"
+    ],
+    "semantic_query": "essays written before 2021"
+  }
+}

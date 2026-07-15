@@ -1,3 +1,78 @@
+## Project Goals & North Star
+ 
+*Where the project is trying to end up, and how to tell whether it got there. Written to survive contact with the eval — the headline finding (NL parsing regresses retrieval) is reckoned with here, not papered over.*
+ 
+### North star
+ 
+**A native macOS app that finds a file by what you remember about it — its contents, topic, and rough kind — running entirely on-device, and beats Spotlight decisively on the "I forgot what I named it" case.** Not a faster `grep`, not a filename matcher. The user describes the file in a sentence; Oasis returns it. Everything indexes and searches locally; nothing leaves the machine.
+ 
+That sentence is the whole project. Every horizon below is a step toward it, and every non-goal is something that isn't it.
+ 
+### The core hypothesis, and what "natural language" actually means now
+ 
+The project was premised on a specific bet: that an LLM parsing a query into **structured filters** (`file_types`, `date_range`, `folders`) plus a distilled `semantic_query` would beat feeding the raw sentence to hybrid retrieval. **The eval measured that bet and it lost** — parsing costs −0.108 ndcg@10 / −0.135 recall@10 on the best configuration (hybrid+CE). See Evaluation for the mechanism (hard filters are an asymmetric-payoff trap; a 3B model's wrong guess zeroes recall).
+ 
+This does **not** put the north star in question, and the distinction is load-bearing enough to state plainly:
+ 
+- **"Natural-language search" is intact and already works.** Typing a natural sentence and getting the right file back via semantic + hybrid + cross-encoder retrieval *is* natural-language search, and it measures 0.56 ndcg@10 / 0.68 recall@10 today with the parsing layer switched off. The user types English; the system understands it semantically. That is the product.
+- **"LLM-parses-queries-into-filters" is a separate, testable bet — currently net-negative.** It is a hypothesis under active test (soft filters, un-distilled embedding, a larger parse model), not a foundation the project stands on. If it never becomes net-positive, it gets cut, and the north star is unaffected.
+Conflating those two would hand the project an identity crisis it doesn't need. The retrieval engine is the proven core; the parsing layer is a research question sitting on top of it.
+ 
+### Goal tiers
+ 
+**Tier 0 — the proven core (done, defend it).**
+Local hybrid retrieval (BM25 + dense vectors, RRF-fused, cross-encoder reranked) over 7 document formats, with a reproducible eval harness that quantifies every change. *Definition of done: met.* The standing goal here is regression defense — no change ships that drops the measured matrix without a recorded, deliberate reason.
+ 
+**Tier 1 — the native macOS app (the actual ultimate deliverable).**
+The CLI proves the engine; the app is the product. *Definition of done:*
+- A signed, notarized `.app` a user double-clicks — no terminal, no Python install, no `pip`.
+- A Spotlight-style summon (global hotkey + menu-bar presence) and a results list that opens files in their default app.
+- Background, incremental indexing that survives reboots (FSEvents-driven), with a first-run Full Disk Access flow that explains itself.
+- The engine reached over the local HTTP service (Phase 5.2), never re-implemented — one retrieval codebase, two front-ends (CLI, app).
+**Tier 2 — make the NL layer earn its place, or kill it.**
+The parsing layer stays disabled by default (`--raw` is the recommended path) until it is measured net-positive on the matrix. *Definition of done: a decision, either direction.*
+- Soft filters (score boost, not `WHERE` exclusion) so a wrong guess costs a little instead of all recall.
+- Embed the user's actual words; reserve the distillation for the FTS5 arm, where it genuinely helps (keyword +0.040).
+- If, after those and a larger parse model, it's still negative → cut it, and write that up. A removed feature with a measured reason is a stronger portfolio artifact than a feature that quietly hurts.
+**Tier 3 — polish, distribution, and Apple-Silicon fit (long horizon).**
+Auto-update (Sparkle), a real onboarding, latency budgets that are *measured* not assumed, and — once the bundle size or inference speed demands it — swapping the embedding/reranking models to Core ML or MLX so the shipped app is smaller and faster on M-series without touching the HTTP contract.
+ 
+### Measurable success criteria
+ 
+The project is doing well when these hold, and they are the only things that count as "better" — no unmeasured claim is a goal.
+ 
+| Dimension | Target | Current |
+|---|---|---|
+| Retrieval quality (best config, raw) | Beat the standing best; never silently regress | ndcg@10 **0.5602**, mrr 0.5427, recall@10 0.6844 |
+| NL parsing layer | Net-positive on the matrix *before* it's default | **−0.108 ndcg@10** — disabled by default |
+| Warm query latency | Establish a p95 budget, then hold it | **not yet measured** — measure via the HTTP service, warm |
+| App startup → ready | Fast enough that models-loading isn't the first impression | governed by the Tier-1 warm-start design |
+| Distribution | One double-click, signed + notarized, zero deps | not started (Tier 1) |
+ 
+Two of those rows are blanks on purpose: latency and startup have never been measured, and pretending a number exists is exactly the failure the eval discipline exists to prevent.
+ 
+### Non-goals (scope boundaries)
+ 
+Naming these is what keeps an ambitious side project finishable.
+ 
+- **Not cloud anything.** No sync, no hosted index, no remote LLM. Offline operation is a product requirement, not a setting. (Recorded already: the Claude API path was deleted; don't reintroduce a cloud provider.)
+- **Not multi-user, not a server product.** The HTTP service is a single-user local seam for the app, loopback-only. It is not a deployment target.
+- **Not iOS/Android — yet.** The clean HTTP contract keeps the door open, but mobile is out of scope until the Mac app is real.
+- **Not competing with Spotlight on exact-filename or system-file lookup.** That's Spotlight's job and it's fine at it. Oasis owns the by-description, by-content case.
+- **Not the HTMX web UI** on the old README roadmap. Superseded by the native app; kept only as a mental note that the service could render HTML if ever wanted.
+- **OCR, nested `.gitignore`, latin-1 text** and similar remain deferred niceties, not goals — logged in Up Next, not here.
+### Guiding principles
+ 
+1. **Measured, not assumed.** Every "improvement" is a number in `history.jsonl` or it didn't happen. The project already killed its headline feature on this principle; that's the bar.
+2. **Local-first, privacy as a feature.** On-device by default, no telemetry, search text never leaves the machine (down to `access_log=False` so queries don't even hit a log).
+3. **One engine, many front-ends.** CLI, HTTP service, and app are thin shells over the same retrieval code. A capability is added once, in the core.
+4. **Honesty over marketing** — in the README, on the résumé, everywhere. The defensible claim is the one you can reproduce.
+### The portfolio goal (explicit)
+ 
+This is a career-driving project, and its résumé value is *not* "I built a Mac app." It's evidence of empirical engineering judgment: **built a rigorous IR evaluation harness, used it to discover that a planned headline feature was a −0.11 ndcg@10 regression, diagnosed the cause as an asymmetric-payoff problem per-query, and made the evidence-based call to disable it.** That story — a measured reversal and a diagnosis — is rarer and worth more than any architecture name-drop, and it should be the spine of how the project is presented. The cross-encoder's measured +14.7% and the RRF-buys-recall / CE-buys-precision split are the supporting technical claims, each fully reproducible.
+ 
+Do not, anywhere, claim NL parsing improves retrieval. The measured claim is the opposite, and the opposite is the better story.
+
 # Oasis — Development Context
 
 Running log of decisions, current state, and what's next. Updated with every change.
@@ -101,7 +176,61 @@ NL parsing: every non-`--raw` search calls `ensure_ollama()` behind a spinner; o
 - `run_eval.py` builds a dedicated index under `eval/index/` (gitignored), parses each query exactly as the CLI does (fixed `today=2026-07-07`), runs `hybrid_search(top_n=20)` + rerank to 10, maps results back to corpus-relative keys, scores with **ranx**. Flags: `--reindex`, `--no-rerank`, `--no-parse`, `--today`.
 - Writes `results/latest.json` + appends `results/history.jsonl`; `plot.py` charts ndcg@10/precision@5/mrr over history.
 
-**Current baseline** (2 runs in history; Ollama unavailable → raw mode, rerank on):
+> ### 🔴 HEADLINE FINDING: NL parsing makes retrieval **worse**, not better
+>
+> Measured 2026-07-14, once Ollama actually worked for the first time. All four rows share **one frozen parse set** (run 1 populates the cache incl. failures; runs 2–4 replay `83 hits / 0 misses`), so retrieval strategy is the only variable.
+>
+> | mode | ndcg@10 raw | ndcg@10 parsed | Δ | recall@10 raw | recall@10 parsed | Δ |
+> |---|---|---|---|---|---|---|
+> | keyword (BM25) | 0.1768 | 0.2163 | **+0.040** | 0.1792 | 0.2156 | +0.036 |
+> | semantic (vector) | **0.4937** | 0.4156 | −0.078 | 0.6167 | 0.4990 | −0.118 |
+> | hybrid (RRF) | 0.4884 | 0.4246 | −0.064 | 0.6500 | 0.5260 | −0.124 |
+> | **hybrid + CE** | **0.5602** | 0.4522 | **−0.108** | **0.6844** | 0.5490 | **−0.135** |
+>
+> **The best configuration Oasis has is `--raw`** — i.e. the NL parsing layer switched off. Parsing only helps keyword mode, and only because it rescues BM25 from being fed a whole sentence.
+>
+> **Why — two independent mechanisms, both verified per-query.** 19 of 80 queries went from finding the answer to finding *nothing* (several `recall 1.00 → 0.00`):
+>
+> 1. **Hallucinated hard filters exclude the gold document.** Of 71 successful parses, **24 set `file_types`, 18 set `date_range`, 5 set `folders`** — far more than the query set actually mentions.
+>    - `"ffmpeg convert video"` → `file_types: ['.mp4','.mov','.avi']`. It confused *the topic of the document* with *the type of the document*; the gold doc is `md/tldr-ffmpeg.md`, and Oasis doesn't even index `.mp4`. Recall → 0.
+>    - `"the storage system google built for structured data at scale"` → `file_types: ['.txt']`, invented from nothing. Gold is a `.pdf`. Recall → 0.
+>    - `"powerpoint about onboarding new employees"` → correct `.pptx`, but *also* invented `date_range: after 2026-06-30` for a query with no date in it. Recall → 0.
+> 2. **`semantic_query` distillation destroys or corrupts meaning**, even with no filters set:
+>    - `"speech asking citizens to serve their country rather than be served"` → `'civic duty'`. A near-verbatim description of the JFK inaugural, reduced to two generic words that embed nowhere near it. 1.00 → 0.00.
+>    - `"rising ocean temperatures are killing the reef"` → `'ocean pollution'`. **Factually a different topic** — bleaching is thermal, not pollution. 1.00 → 0.00.
+>    - `"ownership borrow checker"` → `'borrow checker'`, dropping the one word that titles the gold doc (`rust-book-ownership.md`).
+>
+> **The root cause is an asymmetry, not a bad prompt.** Filters are *hard* constraints (`WHERE extension IN …`) bolted onto a system whose whole value is fuzzy matching. A correct filter helps marginally (slight reorder); a wrong filter is catastrophic (excludes the answer, recall → 0). llama3.2:3b is wrong often enough that the expected value is strongly negative. Prompt-tuning cannot fix an asymmetric payoff — **the filters need to become soft (a score boost) rather than hard (an exclusion), and the embedder should see the original query, not the distillation.**
+>
+> Also: **12/83 parses fail outright** (`InstructorRetryException`) and fall back to raw silently — ~15% of queries in this run, 19/83 in an earlier one. Non-deterministic.
+>
+> **Do not put "NL parsing improves retrieval" on a résumé.** The measured claim is the opposite. The defensible story is: *"built an eval harness, discovered the headline feature was a net −0.11 ndcg@10 regression, and diagnosed why."* That is a better story than the one that was planned.
+>
+> ### Earlier warning (now resolved — kept for the audit trail)
+>
+> **`ensure_ollama()` reports success for a provider that fails every call.** It checks that the server answers HTTP and that the model is listed; it never checks that *inference works*. On this machine both checks pass and all 83/83 parses raise: Homebrew's `ollama` 0.30.0 ships without the `llama-server` binary, so every request 500s. The harness recorded `llm_used: true` while measuring raw queries. **Every eval number ever produced by this project is a raw-mode number.** (Fixed in the harness: `llm_used` now means "the LLM actually parsed something", with `llm_parse_ok`/`llm_parse_failed` counts beside it. Not yet fixed in `llm/manager.py` — see Up Next.)
+>
+> **Consequence: the keyword row of the comparison table is a strawman.** Raw mode feeds the whole natural-language sentence to FTS5, which ANDs every term, so a 19-word query needs all 19 words in one document. **62 of 80 keyword queries return zero results.** Distilling that sentence into `semantic_query` + `keywords` is the parser's entire job. So:
+> - The measured `hybrid+CE vs keyword` gap (+38.3 ndcg points, +217%) is **inflated and must not be published or put on a résumé.** It measures BM25-fed-a-sentence, not BM25.
+> - `hybrid (RRF)` scoring *below* `semantic` alone (0.4884 vs 0.4937 ndcg) is likely the same artifact — RRF is fusing a near-dead keyword arm.
+> - Only the `semantic` row is unaffected by the parser being down.
+>
+> **Nothing here is quotable until Ollama actually runs and the table is regenerated.**
+
+**Measured — raw mode only** (`--no-parse`; identical to LLM-on because 83/83 parses fail). Corpus 301 files, 80 scored queries, `today=2026-07-07`:
+
+| mode | ndcg@10 | mrr | recall@10 | p@5 | p@10 |
+|---|---|---|---|---|---|
+| keyword (BM25) | 0.1768 | 0.1931 | 0.1792 | 0.0600 | 0.0312 |
+| semantic (vector) | 0.4937 | 0.4950 | 0.6167 | 0.1950 | 0.1200 |
+| hybrid (RRF) | 0.4884 | 0.4632 | 0.6500 | 0.1975 | 0.1275 |
+| **hybrid + CE rerank** | **0.5602** | **0.5427** | **0.6844** | **0.2250** | **0.1338** |
+
+Reproduce: `uv run python eval/run_eval.py --mode {keyword,semantic,hybrid} [--no-rerank] --no-parse --no-history --out eval/results/ablations/NAME.json`.
+
+The one solid read: **the cross-encoder is doing real work** — it's the only step that converts RRF's better recall (0.65 vs 0.617) into better ranking (+0.072 ndcg over raw fusion), and it's parser-independent.
+
+**Regression history** (2 rows; both raw mode, rerank on):
 
 | metric | before arm split | **after** | rel |
 |---|---|---|---|
@@ -243,12 +372,22 @@ Landed ahead of the API so `api/` can be written against a stable pipeline:
 ## Up Next
 
 - **Implement the HTTP API** (`src/oasis/api/`) against the spec in `CLAUDE.md`. The pipeline is ready; `fastapi`/`uvicorn` still need adding.
+- **🔴 Make the NL filters soft, and stop distilling the embedding query.** The measured headline finding (top of Evaluation): parsing costs −0.108 ndcg@10 / −0.135 recall@10 on hybrid+CE. Two fixes, both small:
+  1. **Soft filters.** `_build_vec_where` / `_build_kw_filters` turn LLM guesses into hard `WHERE` exclusions, so one wrong guess zeroes a query's recall. Convert to a post-hoc score boost so a wrong guess costs a little and a right one still helps. This is an asymmetric-payoff problem, not a prompt problem — no amount of prompt-tuning fixes it.
+  2. **Embed the original query, not `semantic_query`.** Distillation produced `'civic duty'` for the JFK inaugural and `'ocean pollution'` for coral bleaching. Keep `semantic_query` for the FTS5 arm (where it genuinely helps: keyword +0.040) and give the embedder the user's actual words.
+  - Re-run the matrix after each change; the harness now supports it directly.
+- **Consider a bigger parse model.** 12–19 of 83 parses fail outright with `llama3.2:3b`, non-deterministically, and the successful ones hallucinate filters. Worth measuring `llama3.1:8b` before concluding the feature is unsalvageable.
+- **Fix `ensure_ollama()`'s health check** (`llm/manager.py`). It verifies "server answers HTTP" + "model appears in `ollama list`" and calls that available — but a provider that passes both can still 500 on every inference (exactly what a broken `llama-server` does). The CLI then silently falls back to raw on every search and **the user is never told the feature is dead**; the eval reported `llm_used: true` for 83/83 failures. The check should do one tiny real completion, cache the result, and treat a failure as unavailable. This is the difference between "Ollama isn't installed" (fine, expected) and "Ollama is lying to you" (currently indistinguishable).
+- **Regenerate the comparison table once the parser runs.** The current keyword row is invalid as a baseline (see the warning under Evaluation).
 - **Pre-existing lint debt: 66 ruff errors**, unrelated to any recent change and untouched. Mostly `F401` (15, unused imports), `I001` (14, import sorting), `N806` (13, non-lowercase locals in tests), `UP017` (7, `datetime.timezone.utc` → `datetime.UTC`). Also 6 `B008` on `typer.Option` defaults, which are **false positives** — that's Typer's documented pattern and should be added to `ignore`. `ruff format` would additionally reformat 29 files. Worth one dedicated cleanup commit; deliberately not bundled into feature work.
 - Nested `.gitignore` support in the walker (per-directory, not just root).
 - UTF-8-only text extractor can't read latin-1 files (`edge-latin1-menu.txt` in the corpus).
 - OCR fallback for scanned PDFs.
 
 ### Recently done (2026-07-14)
+- **Ollama actually works now, for the first time.** Homebrew's `ollama` 0.30.0 formula ships without the `llama-server` binary — the server answers HTTP and `ollama list` works, but every inference 500s. Replaced with the `ollama-app` cask (0.32.0) and removed the formula. **Side effect to be aware of: `brew install --cask` autoremoved `mongosh` entirely** (`brew install mongosh` to restore). Note `ollama` is no longer on `PATH` — the cask only installs the CLI symlink after you click through its first-run GUI — which `manager.py` needs for `ollama list`.
+- **Test suite was not hermetic.** `test_cli_edges.py` mocked the embedder, LanceDB, and the cross-encoder but *not* `ensure_ollama`, so the FTS5-syntax-error tests depended on the machine's Ollama state. They passed for months only because the local Ollama was broken, and failed the moment it was fixed (a working LLM rewrites the deliberately-malformed query into a valid one, so the test silently stops testing anything). `test_cli.py` already patched it; `test_cli_edges.py` now does too.
+- **Eval harness: `--mode`, parse cache, honest `llm_used`.** `--mode {keyword,semantic,hybrid}` mirrors the CLI so keyword/semantic baselines are measurable at all (previously impossible — it only ever called `hybrid_search`). Rerank defaults to on for hybrid, off otherwise, matching the CLI rather than measuring an ablation the product never runs. `--no-history`/`--out` keep mode comparisons out of the regression time series. Scores are **positional**, because FTS5's `rank` is *negative* (more negative = better) while vector distance is positive — feeding either raw to ranx, which sorts descending, would silently invert the ranking and make that mode look catastrophic.
 - **Split `hybrid_search`'s try blocks** — the eval's open finding, now fixed. Worth **+23% ndcg@10** (0.455 → 0.560) with no ranking change; it purely recovers the 10 punctuation queries that were scoring 0. Amended the API contract to match: hybrid `200`s and degrades, only keyword mode `400`s.
 - **Pipeline `cancel` + `permission_denied`** (see Phase 5.2 above).
 - **Python version reconciled to 3.14** across all four sources: `requires-python = ">=3.14"`, ruff `target-version = "py314"`, README "3.14+", venv already 3.14. Chosen over 3.13 because it's what actually runs and all tests pass on it; **verified PyInstaller 6.21.0 resolves cleanly under `>=3.14`**, so Phase E isn't boxed in. The bump surfaced exactly 1 new lint error (`UP043` in `walker.py`), fixed.
