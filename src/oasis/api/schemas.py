@@ -55,6 +55,14 @@ class HealthResponse(ApiModel):
     # A dimension mismatch means the stored vectors are unusable even though
     # they exist, so this is what the app should gate its search box on.
     semantic_ready: bool = False
+    # The index's recorded schema version; 0 when absent (pre-meta-table).
+    schema_version: int = 0
+    # Derived server-side (the client does no version math): there are
+    # documents, and either the schema predates the current one or semantic
+    # search isn't usable. A never-indexed DB (0 docs) is "index me", a
+    # different state — this stays false there. The granular fields above are
+    # kept so the app can word the prompt.
+    reindex_recommended: bool = False
 
 
 class OpenRequest(ApiModel):

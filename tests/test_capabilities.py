@@ -152,7 +152,7 @@ def test_capabilities_after_indexing_with_embedder(tmp_path, corpus):
     assert stats["indexed"] == 2
 
     caps = KeywordIndex(conn).get_capabilities()
-    assert caps.schema_version == SCHEMA_VERSION == 1
+    assert caps.schema_version == SCHEMA_VERSION == 2
     assert caps.vectors_built is True
     assert caps.embedding_model == "fake-minilm"
     assert caps.embedding_dimension == LIVE_DIM
@@ -243,6 +243,9 @@ def test_health_semantic_ready_true_for_vector_index(monkeypatch, tmp_path, corp
     assert body["embedding_model"] == "fake-minilm"
     assert body["embedding_dimension"] == LIVE_DIM
     assert body["semantic_ready"] is True
+    # Fresh index: current schema + usable vectors → nothing to recommend.
+    assert body["schema_version"] == SCHEMA_VERSION
+    assert body["reindex_recommended"] is False
 
 
 def test_health_over_legacy_index_reports_not_semantic_ready(monkeypatch, tmp_path):
@@ -261,6 +264,10 @@ def test_health_over_legacy_index_reports_not_semantic_ready(monkeypatch, tmp_pa
     assert body["semantic_ready"] is False  # → app should prompt a reindex
     assert body["embedding_model"] is None
     assert body["embedding_dimension"] is None
+    # Documents exist but the schema predates the current one: the one-boolean
+    # signal the app acts on, derived server-side.
+    assert body["schema_version"] == 0
+    assert body["reindex_recommended"] is True
 
 
 def test_health_dimension_mismatch_is_not_semantic_ready(monkeypatch, tmp_path, corpus):
@@ -283,6 +290,30 @@ def test_health_dimension_mismatch_is_not_semantic_ready(monkeypatch, tmp_path, 
     assert body["vectors_built"] is True  # they're there…
     assert body["embedding_dimension"] == 384
     assert body["semantic_ready"] is False  # …but unusable at 512
+    # Current schema, but semantic search is unusable and documents exist —
+    # semantic_ready alone is enough to recommend a reindex.
+    assert body["schema_version"] == SCHEMA_VERSION
+    assert body["reindex_recommended"] is True
+
+
+def test_health_never_indexed_db_is_not_reindex_recommended(monkeypatch, tmp_path):
+    """0 documents is 'index me', not 'reindex me' — a different app state.
+
+    Without the documents > 0 guard a brand-new empty DB (schema 0, no
+    vectors) would tell the user to reindex an index that never existed.
+    """
+    db_path = tmp_path / "index.db"
+    open_db(db_path).close()  # DB file exists, nothing ever indexed
+
+    app, client = _client(monkeypatch, db_path)
+    with client:
+        assert app.state.oasis.ready.wait(timeout=10)
+        body = client.get("/api/health").json()
+
+    assert body["documents"] == 0
+    assert body["semantic_ready"] is False
+    assert body["schema_version"] == 0
+    assert body["reindex_recommended"] is False
 
 
 def test_health_while_loading_reports_capability_fields_as_defaults(monkeypatch, tmp_path, corpus):
@@ -314,6 +345,8 @@ def test_health_while_loading_reports_capability_fields_as_defaults(monkeypatch,
         assert body["embedding_model"] is None
         assert body["embedding_dimension"] is None
         assert body["semantic_ready"] is False
+        assert body["schema_version"] == 0
+        assert body["reindex_recommended"] is False
 
         gate.set()
         assert app.state.oasis.ready.wait(timeout=10)

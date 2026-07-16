@@ -453,6 +453,63 @@ def test_permission_denied_reported_via_on_file(
 
 
 # ---------------------------------------------------------------------------
+# Relative roots — stored paths must be absolute
+#
+# The walker yields root-joined paths, so a relative root used to store
+# relative keys.  Those are CWD-ambiguous: `oasis index .` from /a and from /b
+# stored the same string for DIFFERENT files, and the UNIQUE path column's
+# ON CONFLICT DO UPDATE silently overwrote the first with the second —
+# document loss, not an API quirk.  index_directory now absolutizes root once
+# at entry (os.path.abspath: lexical, no symlink rewriting).
+# ---------------------------------------------------------------------------
+
+
+def test_relative_roots_from_different_cwds_do_not_collide(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = open_db(tmp_path / ".db" / "test.db")
+    dir_a = tmp_path / "a"
+    dir_b = tmp_path / "b"
+    dir_a.mkdir()
+    dir_b.mkdir()
+    (dir_a / "notes.txt").write_text("alpha notes about revenue")
+    (dir_b / "notes.txt").write_text("beta notes about biology")
+
+    monkeypatch.chdir(dir_a)
+    index_directory(conn, Path("."))
+    monkeypatch.chdir(dir_b)
+    index_directory(conn, Path("."))
+
+    idx = KeywordIndex(conn)
+    # Without the abspath both runs store the key "notes.txt" and this is 1:
+    # the second run's upsert overwrote the first document's row.
+    assert idx.count() == 2
+    assert idx.get_doc_id(dir_a / "notes.txt") is not None
+    assert idx.get_doc_id(dir_b / "notes.txt") is not None
+
+
+def test_relative_root_stores_only_absolute_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A relative stored path is meaningless as a key — nothing records what it
+    # was relative to — so it must never reach the documents table.
+    conn = open_db(tmp_path / ".db" / "test.db")
+    docs = tmp_path / "docs"
+    sub = docs / "sub"
+    sub.mkdir(parents=True)
+    (docs / "one.txt").write_text("one")
+    (sub / "two.txt").write_text("two")
+
+    monkeypatch.chdir(tmp_path)
+    stats = index_directory(conn, Path("docs"))
+
+    assert stats["indexed"] == 2
+    rows = conn.execute("SELECT path FROM documents").fetchall()
+    assert len(rows) == 2
+    assert all(Path(row["path"]).is_absolute() for row in rows)
+
+
+# ---------------------------------------------------------------------------
 # cancel
 # ---------------------------------------------------------------------------
 

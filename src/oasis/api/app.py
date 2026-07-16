@@ -23,6 +23,7 @@ from oasis.api.schemas import ErrorDetail, ErrorResponse, HealthResponse
 from oasis.api.search import router as search_router
 from oasis.api.state import AppState, get_conn
 from oasis.config import load_config
+from oasis.index.db import SCHEMA_VERSION
 from oasis.index.embeddings import SentenceTransformerEmbedder
 from oasis.index.keyword import KeywordIndex
 from oasis.index.vector import VectorIndex
@@ -229,6 +230,12 @@ def create_app(*, token: str, db_path: Path | None = None) -> FastAPI:
             and caps.embedding_dimension is not None
             and caps.embedding_dimension == live_dimension
         )
+        # Derived here, not in the client — the app shouldn't do version math.
+        # The documents > 0 guard keeps a never-indexed DB reading as "index
+        # me" (reindex_recommended false), a different state from "reindex me".
+        reindex_recommended = caps.document_count > 0 and (
+            caps.schema_version < SCHEMA_VERSION or not semantic_ready
+        )
         return HealthResponse(
             status=state.status,
             version=version,
@@ -238,6 +245,8 @@ def create_app(*, token: str, db_path: Path | None = None) -> FastAPI:
             embedding_model=caps.embedding_model,
             embedding_dimension=caps.embedding_dimension,
             semantic_ready=semantic_ready,
+            schema_version=caps.schema_version,
+            reindex_recommended=reindex_recommended,
         )
 
     app.include_router(protected_router)

@@ -165,13 +165,22 @@ The readiness probe. **No auth** — it's the endpoint the Swift app polls immed
 
 ```jsonc
 {
-  "status": "loading",   // "loading" | "ready" | "error"
-  "version": "0.1.0",    // importlib.metadata.version("oasis")
-  "documents": 1042,     // null while loading, or when no index exists
-  "error": null          // message when status == "error"
+  "status": "loading",           // "loading" | "ready" | "error"
+  "version": "0.1.0",            // importlib.metadata.version("oasis")
+  "documents": 1042,             // null while loading, or when no index exists
+  "error": null,                 // message when status == "error"
+  // Index capability fields (defaults while loading):
+  "vectors_built": true,
+  "embedding_model": "all-MiniLM-L6-v2",
+  "embedding_dimension": 384,
+  "semantic_ready": true,        // vectors_built AND built at the live embedder's dimension
+  "schema_version": 2,           // from the index's meta table; 0 when absent (legacy)
+  "reindex_recommended": false   // derived SERVER-SIDE — the client does no version math
 }
 ```
 Always `200` — `status` carries the state. The Swift app keeps its search box disabled until `status == "ready"`.
+
+`reindex_recommended` = `documents > 0 AND (schema_version < SCHEMA_VERSION OR NOT semantic_ready)`. The `documents > 0` guard matters: a never-indexed DB (0 docs) is "index me", a different state than "reindex me", so it stays `false` there. The granular fields (`vectors_built`, `embedding_model`, `embedding_dimension`, `semantic_ready`) stay alongside the boolean so the app can word the prompt.
 
 Every other endpoint returns `503` while `status != "ready"`, rather than blocking until models finish. An honest "not yet" beats a request that hangs for 8 seconds.
 
@@ -309,11 +318,13 @@ Deletes the SQLite DB, its `-wal`/`-shm` companions, and the `.lance` directory.
 **Takes a path, not `{"n": 2}`.** An index into "the most recent search" is server-side session state — the `last_results.json` hack, which is a reasonable shortcut for a CLI (one user, one terminal, strictly sequential) and wrong for a server. The client already has the paths from the search response; it should send one. This also makes the endpoint idempotent and order-independent.
 
 **Validate the path against the index before shelling out.** Loopback + token is good, but this hands request input to a subprocess, so treat it as untrusted regardless of who can reach the port:
-1. `Path(req.path).resolve()` — normalize away `..` and symlinks.
-2. `KeywordIndex.get_doc_id(resolved)` — the path must be a document Oasis actually indexed. This is stricter and simpler than a root-prefix check: an exact lookup against the `documents` table has no prefix arithmetic to get subtly wrong (`/Users/you/Documents` must not match `/Users/you/Documents-private`), and it reuses a method that already exists.
-3. Only then `subprocess.run(["open", str(resolved)], check=False)`.
+1. `os.path.abspath(req.path)` — the identical normalization storage uses (the pipeline applies `abspath` once to the index root), so lookups can't drift from stored form. Lexical only: normalizes away `..`, never follows symlinks. A no-op on the absolute paths the client echoes back from `/api/search`; defensive if a relative path somehow arrives. **No `resolve()`** — resolving the request would follow symlinks that storage did not, reintroducing the exact mismatch this removes.
+2. `KeywordIndex.get_doc_id(p)` — the path must be a document Oasis actually indexed. This is the security boundary, stricter and simpler than a root-prefix check: an exact lookup against the `documents` table has no prefix arithmetic to get subtly wrong (`/Users/you/Documents` must not match `/Users/you/Documents-private`), and it reuses a method that already exists.
+3. Only then `subprocess.run(["open", p], check=False)`.
 
 Status codes fall out of that cleanly: `404` if the path isn't in the index (never was a result), `410` if it is indexed but the file is gone from disk (was a result, has since moved) — worth keeping distinct, since the second case is the one where the app should offer to re-index. `204` on success.
+
+**Open matches the exact stored (abspath) form and does not chase symlink aliases.** A request that reaches an indexed file through a different symlink alias returns `404` — safe (fail-closed), and a non-issue for the real client, which echoes stored paths verbatim.
 
 ### Snippet format (segments)
 

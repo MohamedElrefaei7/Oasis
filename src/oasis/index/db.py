@@ -1,10 +1,14 @@
 import sqlite3
 from pathlib import Path
 
-# What the current schema guarantees: documents + FTS + vector chunks. An index
+# What the current schema guarantees: documents + FTS + vector chunks, with
+# every stored path absolute (the pipeline absolutizes its root). An index
 # built before the meta table exists has no schema_version row and reads as 0.
 # Bump when a change requires a reindex to be usable.
-SCHEMA_VERSION = 1
+#   1 → 2: stored paths guaranteed absolute; relative-root indexes (which
+#          could silently collide across CWDs) read as < 2 and get flagged
+#          reindex-needed via /api/health.
+SCHEMA_VERSION = 2
 
 # title and content must exist in `documents` because the FTS virtual table
 # uses content=documents — SQLite fetches those columns by rowid on query.

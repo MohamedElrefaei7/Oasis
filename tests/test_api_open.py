@@ -103,44 +103,23 @@ def test_indexed_file_opens_204(ctx, run_mock):
     resp = _post(client, target)
     assert resp.status_code == 204
     assert resp.content == b""
-    assert run_mock == [["open", str(target.resolve())]]
+    # Opened exactly as stored — no resolve(), no rewriting.
+    assert run_mock == [["open", str(target)]]
 
 
 # ---------------------------------------------------------------------------
-# Path normalization — the case a naive absolute-in/absolute-stored test misses
+# Path normalization — the request must equal the stored (abspath) form.
+# Storage normalizes with os.path.abspath (lexical, no symlink following), so
+# the lookup does the identical thing and never chases symlink aliases.
 # ---------------------------------------------------------------------------
 
 
-def test_symlinked_request_path_resolves_to_indexed_doc(ctx, run_mock):
-    """Indexed by its real path, requested through a symlinked directory.
+def test_stored_form_containing_symlink_opens_204(ctx, run_mock):
+    """Indexed *through* a symlinked root (so the stored path contains the
+    symlink, unresolved) and requested in that exact form — what the app
+    round-trips back from /api/search, since search returns paths as stored.
 
-    Matching only the raw request string would 404 here.
-    """
-    client, tmp_path, db_path = ctx
-    real_dir = tmp_path / "real"
-    real_dir.mkdir()
-    target = real_dir / "doc.txt"
-    target.write_text("indexed content")
-    _index_file(db_path, target)  # stored: /…/real/doc.txt
-
-    link_dir = tmp_path / "link"
-    link_dir.symlink_to(real_dir, target_is_directory=True)
-    via_link = link_dir / "doc.txt"
-    assert via_link.resolve() == target.resolve()
-
-    resp = _post(client, via_link)
-    assert resp.status_code == 204
-    # Opened by its canonical path, not the symlinked one it was asked for.
-    assert run_mock == [["open", str(target.resolve())]]
-
-
-def test_symlinked_stored_path_matches_raw_request(ctx, run_mock):
-    """Indexed *through* a symlink (so the stored path is unresolved), and
-    requested in that same form — which is what the app round-trips back from
-    /api/search, since search returns paths exactly as stored.
-
-    Resolving only the request side would 404 here: the mirror image of the
-    test above, and the reason the endpoint tries both forms.
+    A resolve() anywhere in the lookup would 404 this legitimate request.
     """
     client, tmp_path, db_path = ctx
     real_dir = tmp_path / "real2"
@@ -155,7 +134,33 @@ def test_symlinked_stored_path_matches_raw_request(ctx, run_mock):
 
     resp = _post(client, via_link)
     assert resp.status_code == 204
-    assert run_mock == [["open", str(via_link.resolve())]]
+    # Opened by the stored form, not rewritten through the symlink.
+    assert run_mock == [["open", str(via_link)]]
+
+
+def test_symlink_alias_of_stored_form_is_404(ctx, run_mock):
+    """Indexed by its real path, requested through a symlink alias.
+
+    Open matches the exact stored form and does not chase aliases — safe
+    (fail-closed), and a non-issue for the real client, which only ever sends
+    paths it received from /api/search.
+    """
+    client, tmp_path, db_path = ctx
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    target = real_dir / "doc.txt"
+    target.write_text("indexed content")
+    _index_file(db_path, target)  # stored: /…/real/doc.txt
+
+    link_dir = tmp_path / "link"
+    link_dir.symlink_to(real_dir, target_is_directory=True)
+    via_link = link_dir / "doc.txt"
+    assert via_link.resolve() == target.resolve()  # same file, different alias
+
+    resp = _post(client, via_link)
+    assert resp.status_code == 404
+    _assert_envelope(resp.json())
+    assert run_mock == []
 
 
 def test_traversal_path_is_404(ctx, run_mock):
@@ -164,17 +169,20 @@ def test_traversal_path_is_404(ctx, run_mock):
     target.write_text("indexed content")
     _index_file(db_path, target)
 
-    # Resolves to /etc/passwd, which is not indexed.
+    # abspath-normalizes to /etc/passwd, which is not indexed.
     resp = _post(client, tmp_path / ".." / ".." / ".." / ".." / "etc" / "passwd")
     assert resp.status_code == 404
     _assert_envelope(resp.json())
     assert run_mock == []
 
 
-def test_relative_path_is_400(ctx, run_mock):
+def test_relative_path_is_404(ctx, run_mock):
+    # Storage never contains relative paths (the pipeline absolutizes its
+    # root), and the client echoes stored paths — a relative request is
+    # defensively absolutized against the server's CWD and misses the index.
     client, _tmp_path, _db_path = ctx
     resp = _post(client, "relative/doc.txt")
-    assert resp.status_code == 400
+    assert resp.status_code == 404
     _assert_envelope(resp.json())
     assert run_mock == []
 

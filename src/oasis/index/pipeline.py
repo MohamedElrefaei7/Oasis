@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 import threading
 from collections.abc import Callable
@@ -94,6 +95,15 @@ def index_directory(
     and returns partial stats.  Work already committed stays committed;
     indexing is incremental, so the next run resumes where this one stopped.
     """
+    # Stored paths are root-joined walker output, so a relative root means
+    # relative stored keys — CWD-ambiguous, and two runs from different CWDs
+    # silently overwrite each other's rows via upsert's ON CONFLICT (the same
+    # relative string names different files). Absolutize once, here, so every
+    # caller inherits it and no relative path can ever reach the documents
+    # table. os.path.abspath, not resolve(): lexical only, no symlink
+    # rewriting, and a no-op on already-absolute roots.
+    root = Path(os.path.abspath(root))
+
     stats: dict[str, int] = {
         "indexed": 0,
         "skipped": 0,
