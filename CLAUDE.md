@@ -128,7 +128,7 @@ All routes are prefixed `/api`. Responses are `application/json` (except SSE); P
 | `GET` | `/api/search` | yes | `SearchResponse` |
 | `POST` | `/api/index` | yes | `202` + `JobResponse` (or `409`) |
 | `GET` | `/api/index/events` | yes | `text/event-stream` |
-| `POST` | `/api/index/cancel` | yes | `202` (or `404`) |
+| `POST` | `/api/index/cancel` | yes | `202` (or `409`) |
 | `POST` | `/api/reset` | yes | `204` |
 | `POST` | `/api/open` | yes | `204` |
 
@@ -244,17 +244,20 @@ This follows from `hybrid_search`'s arms failing independently (fixed in `query/
 - **`llm_parsed`** — did the LLM actually run (mirrors the CLI's `·  parsed` footer badge). Distinct from `parsed` being non-null, same as in `cli/app.py`.
 - **`latency_ms`** — server-side, measured around retrieval only, warm. This is the honest number for the README benchmarks table: timing the CLI measures model loading, which a running server never pays. Add it now — retrofitting it means re-running the whole eval to regenerate the numbers.
 
-#### `POST /api/index`
+#### `POST /api/index` — **implemented (`api/index.py`, `api/jobs.py`, 2026-07-16)**
 ```jsonc
-{ "path": "/Users/you/Documents", "force": false }
+{ "root": "/Users/you/Documents", "force": false }
 ```
+> **Body field is `root`, not `path`.** `/api/index` takes a *directory* to walk; `/api/open` takes a *file*. The distinct name keeps the two from being confused, and `root` matches the pipeline's own parameter. `force` is on the wire now but this commit only passes it through to `index_directory(force=…)` (re-embed everything); its stale-sweep semantics land next commit — the shape is fixed so the client never changes.
+
 **Returns `202` immediately with a job handle — it does not block.** The CLI's blocking behavior is wrong here, and the "indexing is incremental so re-runs are fast" rationale only covers re-runs. The case that decides whether the app feels good is first-time indexing of `~/Documents` on first launch: minutes, not seconds. Blocking means (1) `URLSession`'s default 60s `timeoutIntervalForRequest` kills it outright, (2) no progress — a ten-minute spinner is indistinguishable from a hang, and (3) no cancel.
 
 ```jsonc
 { "job_id": "b1f4...", "status": "running" }
 ```
-- Single-job lock: `409` with the in-flight `job_id` if a job is already running. One writer, always.
-- `400` if `path` doesn't exist or isn't a directory.
+- Single-job lock: `409` with the in-flight `job_id` if a job is already running. The check-and-set (is one running? → install the new job) is atomic under a `job_lock`; without it two concurrent POSTs both read "not running" and both start writing the DB. The lock is held *only* across that check-and-set, never across the run. The guard keys on `status == "running"`, not on "a job exists" — a *finished* job is retained in state (re-attach is first-class, below) and a new POST overwrites it.
+- `400` if `root` doesn't exist or isn't a directory.
+- The job thread catches everything: an uncaught pipeline exception would wedge `status` at `running` (409 forever, no terminal event, SSE clients hung), so on failure it sets `status=error` + publishes a terminal `error` event. **done vs cancelled is decided after the pipeline returns** — `index_directory` returns partial stats either way, so the thread branches on `job.cancel.is_set()`. That distinction is load-bearing for the next commit's stale sweep, which runs only on `status == "done"`.
 - The job runs on a background thread; progress goes out over SSE (below). The pipeline's existing `on_file` and `on_chunks_progress` callbacks publish to the subscriber queues via `loop.call_soon_threadsafe` — that callback design was already right, and blocking would throw the data away.
 
 **`permission_denied` is a distinct stat, not a `failed`.** This is the first thing every real user hits: the app launches, spawns the server, indexes `~/Documents`, and macOS denies it because Full Disk Access was never granted. Folded into `failed: N` it's indistinguishable from a corrupt PDF, so the app can only say "indexed 0 files" — which reads as *Oasis is broken* rather than *Oasis needs permission*, and the user has no idea the fix is two clicks away in System Settings.
@@ -267,26 +270,35 @@ A separate `permission_denied: int` counter lets the Swift app detect `indexed =
 
 `except PermissionError` also guards `path.stat()` and `extractor.extract()`, ahead of the broad handlers — `PermissionError` is an `OSError`, so the existing `except OSError` would otherwise claim it first.
 
-#### `GET /api/index/events`
+#### `GET /api/index/events` — **implemented (`api/index.py`, `api/jobs.py`, 2026-07-16)**
 `text/event-stream`. **The one `async def` endpoint** (see Concurrency model). Emits a `snapshot` event immediately on connect reflecting current state, then streams. **Re-attach is a first-class case, not an afterthought** — the app gets backgrounded, the connection drops, the user comes back and needs to see the job that's still running. The snapshot-first design means a late subscriber is in the same position as one that connected at `t=0`.
+
+Each message carries **both** an SSE `event:` line and a `type` field inside the JSON `data:` (a superset, so either dispatch style works), and the `data:` is serialized through `ApiModel.model_dump_json()` so any datetime (`started_at`/`finished_at`) carries a UTC offset Swift's `.iso8601` decoder accepts. **Progress carries absolute counts, never deltas** — delivery is lossy (throttled + droppable), so a delta stream would desync permanently on one dropped event, while absolutes self-heal on the next tick. The consumer keys off `phase` (`scan`/`embed`), never off "`total` is null", to tell "still walking" from "done but empty".
 
 ```
 event: snapshot
-data: {"job_id": "b1f4...", "status": "running", "phase": "scan", "done": 214, "total": null}
+data: {"type": "snapshot", "job_id": "b1f4...", "status": "running", "root": "/Users/you/Documents",
+       "phase": "scan", "stats": {"indexed": 214, "skipped": 0, "failed": 0, "unsupported": 0,
+       "permission_denied": 0, "chunks": 0}, "done": 214, "total": null,
+       "started_at": "2026-07-16T21:30:48.454+00:00", "finished_at": null, "error": null}
 
 event: progress
-data: {"job_id": "b1f4...", "phase": "scan", "done": 215, "total": null, "path": "/Users/you/Documents/notes.md"}
+data: {"type": "progress", "job_id": "b1f4...", "phase": "scan",
+       "stats": {"indexed": 215, ...}, "done": 215, "total": null}
 
 event: progress
-data: {"job_id": "b1f4...", "phase": "embed", "done": 1280, "total": 4310, "path": null}
+data: {"type": "progress", "job_id": "b1f4...", "phase": "embed",
+       "stats": {"indexed": 812, ..., "chunks": 1280}, "done": 1280, "total": 4310}
 
 event: done
-data: {"job_id": "b1f4...", "indexed": 812, "skipped": 220, "unsupported": 8, "failed": 2, "permission_denied": 0, "chunks": 4310}
+data: {"type": "done", "job_id": "b1f4...", "stats": {"indexed": 812, "skipped": 220,
+       "unsupported": 8, "failed": 2, "permission_denied": 0, "chunks": 4310}}
 
 : ping
 ```
 - **`total` is `null` during `scan`.** The walk is a lazy generator, so the file count isn't known until it finishes — the same reason `cli/app.py` gives the scan task `total=None` and only the embed task a real total. Don't fake it; the client renders indeterminate for scan, determinate for embed.
-- **Terminal events**: `done` (with the final stats dict), `cancelled`, or `error` (`{code, message}`). The stream closes after any of them.
+- **Terminal events**: `done` and `cancelled` (each `{type, job_id, stats}`), or `error` (`{type, job_id, message}`). The stream closes after any of them. A snapshot with no job ever run reports `status: "idle"` and closes; a terminal-status snapshot flushes any event queued in the register→snapshot gap, then closes.
+- **Snapshot ordering**: the handler registers its queue *before* reading the snapshot, so a terminal event firing in that gap lands in the queue instead of vanishing.
 - **Fan-out**: each subscriber gets its own `asyncio.Queue` off a subscriber set, so N connections don't steal each other's events.
 - **Thread → loop**: the index job runs on a worker thread and must not touch an `asyncio.Queue` directly. It publishes via `loop.call_soon_threadsafe(q.put_nowait, event)`, capturing the loop with `asyncio.get_running_loop()` when the job starts. This is the only thread/loop boundary in the server — keep it in one place (`jobs.py`).
 - **Heartbeat**: `await asyncio.wait_for(q.get(), timeout=15)`; on `TimeoutError` emit a `: ping` comment and loop. Dead connections surface promptly and intermediary buffering can't stall the stream.
@@ -295,11 +307,10 @@ data: {"job_id": "b1f4...", "indexed": 812, "skipped": 220, "unsupported": 8, "f
 
 **Progress events are coalesced in the publisher — do not emit one per callback.** `on_file` fires once per file, and a first-time index of `~/Documents` can be 100k files. That's 100k SSE events driving a progress bar that redraws at 60fps at best: pure waste, and the producer outruns the consumer, so a slow client grows an unbounded `asyncio.Queue` behind it until something dies. The callback keeps the *latest* progress state and publishes at most every ~100ms (roughly 6 frames — well under redraw budget and invisible to the user). Terminal events (`done`/`cancelled`/`error`) always publish immediately and are never coalesced. As a backstop, subscriber queues are bounded (`asyncio.Queue(maxsize=…)`): on overflow, **drop intermediate `progress` events, never terminal ones** — a stale progress number self-corrects on the next tick, a dropped `done` hangs the client's spinner forever. Progress is lossy by nature; completion is not.
 
-#### `POST /api/index/cancel`
-```jsonc
-{ "job_id": "b1f4..." }
-```
-`202` if the running job matches; `404` if no job is running or `job_id` doesn't match the in-flight one (guards against cancelling a job the client didn't know had already finished and been replaced). Sets a `threading.Event`; the pipeline checks it between files and aborts cleanly, emitting `cancelled` over SSE with the partial stats. Work already committed stays committed — indexing is incremental, so a cancelled run just means the next one picks up the rest.
+#### `POST /api/index/cancel` — **implemented (`api/index.py`, 2026-07-16)**
+No body. `202` if a job is running (cancel is *requested*, not synchronously effected — the job ends a beat later on its own thread); `409` if no job is running. Sets the running job's `threading.Event`; the pipeline checks it between files and between embed batches and aborts cleanly, and the job thread then settles the terminal status to `cancelled` and publishes a `cancelled` event over SSE with the partial stats. Work already committed stays committed — indexing is incremental, so a cancelled run just means the next one picks up the rest.
+
+> **`409` (not `404`), and no `job_id` in the body.** Cancel keeps "job-state conflict" as one status code across start and cancel. There is exactly one job slot, so a `job_id` to disambiguate isn't needed; the running job is the only thing cancel can act on.
 
 > **Pipeline support for this is already in place** — `index_directory()` takes `cancel: threading.Event | None = None` and checks it in the per-file loop and between embed batches, returning partial stats. Committed work stays committed; indexing is incremental, so the next run resumes where the cancelled one stopped.
 

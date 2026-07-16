@@ -113,6 +113,12 @@ def index_directory(
         "chunks": 0,
     }
     idx = KeywordIndex(conn)
+    # Record which root this index now covers, before the walk — so even a
+    # cancelled or permission-denied run (which returns early below) leaves the
+    # root registered. abspath'd above, deduped by add_indexed_root. The app
+    # reads this for its reindex button, and the planned full-reindex stale
+    # sweep is only valid against roots recorded here.
+    idx.add_indexed_root(str(root))
     do_embed = vector_index is not None and embedder is not None
     pending: list[_PendingDoc] = []
 

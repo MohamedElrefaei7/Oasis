@@ -4,8 +4,10 @@ Skeleton per CLAUDE.md § HTTP API: model lifecycle (background load + warm),
 /api/health, bearer-token auth, readiness gating, and the error envelope.
 Search/index/reset/open endpoints land in later commits on `protected_router`.
 """
+
 from __future__ import annotations
 
+import asyncio
 import importlib.metadata
 import logging
 import secrets
@@ -18,10 +20,12 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from oasis.api.index import router as index_router
 from oasis.api.open import router as open_router
 from oasis.api.schemas import ErrorDetail, ErrorResponse, HealthResponse
 from oasis.api.search import router as search_router
 from oasis.api.state import AppState, get_conn
+from oasis.api.status import router as status_router
 from oasis.config import load_config
 from oasis.index.db import SCHEMA_VERSION
 from oasis.index.embeddings import SentenceTransformerEmbedder
@@ -76,7 +80,11 @@ def _load_state(state: AppState, db_override: Path | None) -> None:
         embedder.embed(["warmup"])
         reranker.rerank(
             "warmup",
-            [HybridResult(path=Path("/dev/null"), doc_id=0, title=None, snippet="warmup", score=0.0)],
+            [
+                HybridResult(
+                    path=Path("/dev/null"), doc_id=0, title=None, snippet="warmup", score=0.0
+                )
+            ],
             top_n=1,
         )
 
@@ -95,6 +103,11 @@ def _load_state(state: AppState, db_override: Path | None) -> None:
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     state: AppState = app.state.oasis
+    # Capture the serving loop HERE — this is the one place get_running_loop()
+    # is valid. The index worker thread bridges to it via call_soon_threadsafe;
+    # capturing in the loader thread (no running loop) or lazily in the SSE
+    # handler (racy against events fired before the first subscriber) is wrong.
+    state.broker.bind_loop(asyncio.get_running_loop())
     loader = threading.Thread(
         target=_load_state,
         args=(state, app.state.db_override),
@@ -145,8 +158,10 @@ PROTECTED = [Depends(require_auth), Depends(require_ready)]
 # construction — and it must be fully populated before create_app() runs,
 # because the catch-all registered there shadows anything added later.
 protected_router = APIRouter(prefix="/api", dependencies=PROTECTED)
+protected_router.include_router(status_router)
 protected_router.include_router(search_router)
 protected_router.include_router(open_router)
+protected_router.include_router(index_router)
 
 
 # ---------------------------------------------------------------------------

@@ -4,6 +4,7 @@ Sync ``def``: torch inference, SQLite, and LanceDB are blocking work and
 belong in the threadpool, not on the event loop (CLAUDE.md § Concurrency).
 Auth + readiness come from protected_router, which includes this router.
 """
+
 from __future__ import annotations
 
 import logging

@@ -12,6 +12,7 @@ non-issue for the real client, which echoes stored paths verbatim from
 identical one — resolving here would reintroduce the exact mismatch this
 design removes.
 """
+
 from __future__ import annotations
 
 import logging

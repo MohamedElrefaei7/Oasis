@@ -214,9 +214,53 @@ class KeywordIndex:
         row = self._conn.execute("SELECT COUNT(*) FROM documents").fetchone()
         return row[0]
 
+    def count_stale(self) -> int:
+        """Count indexed documents whose file no longer exists on disk.
+
+        One ``Path.exists()`` stat per document — cheap per call, but O(documents)
+        filesystem hits, so callers gate it behind a scan cap for large indexes
+        (see the status endpoint's ``STALE_SCAN_CAP``). SQL and path logic stay
+        here in the index layer; the endpoint only decides whether to call it.
+        """
+        rows = self._conn.execute("SELECT path FROM documents").fetchall()
+        return sum(1 for row in rows if not Path(row["path"]).exists())
+
     def last_indexed_at(self) -> float | None:
         row = self._conn.execute("SELECT MAX(indexed_at) FROM documents").fetchone()
         return row[0] if row and row[0] is not None else None
+
+    def get_indexed_roots(self) -> list[str]:
+        """The absolute directory roots this index was built from (deduped).
+
+        Stored as a JSON list under the ``indexed_roots`` meta key. Empty when
+        the index predates root tracking — callers treat that as "unknown"
+        coverage, not "covers nothing".
+        """
+        raw = self.get_meta("indexed_roots")
+        if raw is None:
+            return []
+        try:
+            roots = json.loads(raw)
+        except (ValueError, TypeError):
+            # A corrupt marker can't be trusted; treat it as absent rather than
+            # crashing a status request.
+            return []
+        return [r for r in roots if isinstance(r, str)] if isinstance(roots, list) else []
+
+    def add_indexed_root(self, root: str) -> None:
+        """Record *root* as a directory this index covers (idempotent).
+
+        *root* must already be absolutized (the pipeline applies
+        ``os.path.abspath`` before calling) so the stored form matches the
+        document paths built from it — the stale-sweep reconciliation planned
+        for full reindex is only valid against the exact root that produced the
+        rows, never a guessed common prefix.
+        """
+        roots = self.get_indexed_roots()
+        if root in roots:
+            return
+        roots.append(root)
+        self.set_meta("indexed_roots", json.dumps(roots))
 
     # ------------------------------------------------------------------
     # Internal helpers (used by the pipeline)

@@ -4,6 +4,7 @@ The concurrency rules here come straight from CLAUDE.md § HTTP API ›
 Concurrency model — SQLite connections are thread-local, model objects and
 the LanceDB handle are shared. Getting either one backwards fails silently.
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -12,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+from oasis.api.jobs import EventBroker, IndexJob
 from oasis.config import OasisConfig
 from oasis.index.db import open_db
 from oasis.index.embeddings import EmbeddingModel
@@ -41,6 +43,20 @@ class AppState:
     status: Literal["loading", "ready", "error"] = "loading"
     error: str | None = None
     ready: threading.Event = field(default_factory=threading.Event)
+
+    # --- Index job (POST /api/index + SSE + cancel) ---
+    # The last job started, running or finished. NOT cleared on completion:
+    # re-attach is first-class (a subscriber connecting after a job ends must
+    # get a terminal snapshot, not an empty stream), so the finished job stays
+    # here until the next POST /api/index overwrites it. The single-job 409
+    # guard keys on status == "running", not on "a job exists".
+    index_job: IndexJob | None = None
+    # Held ONLY across the check-and-set in POST /api/index (is a job running?
+    # → install the new one), never across the pipeline run. Without it two
+    # concurrent POSTs both read "not running" and both start writing the DB.
+    job_lock: threading.Lock = field(default_factory=threading.Lock)
+    # Fan-out to SSE subscribers; its event loop is bound in lifespan startup.
+    broker: EventBroker = field(default_factory=EventBroker)
 
 
 # --------------------------------------------------------------------------

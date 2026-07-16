@@ -4,6 +4,7 @@ Kept out of app.py so the FastAPI app stays importable (and testable) without
 touching sockets or uvicorn. The CLI command in cli/app.py is a thin wrapper
 that imports this lazily, so `oasis search` never pays the fastapi import.
 """
+
 from __future__ import annotations
 
 import json
