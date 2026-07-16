@@ -30,7 +30,9 @@ class SentenceTransformerEmbedder:
         model_name: str = DEFAULT_MODEL,
         batch_size: int = BATCH_SIZE,
     ) -> None:
-        self._model_name = model_name
+        # Public: the pipeline records it as a capability marker so a later run
+        # can tell which model an index's vectors were built with.
+        self.model_name = model_name
         self._batch_size = batch_size
         self._model = _load_model(model_name)
         dim = self._model.get_embedding_dimension()

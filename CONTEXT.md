@@ -83,7 +83,7 @@ Last resynced against the repo: **2026-07-15** (828 tests, all passing; git `fc4
 
 ## Current State
 
-Phases 1–5.1 complete: extraction, keyword index, vector index, hybrid retrieval, NL query parsing, CLI, and the evaluation harness. Phase 5.2 (HTTP API): **server skeleton + `GET /api/search` implemented 2026-07-15** — handshake, model lifecycle, `/api/health`, auth, readiness gating, error envelope, and the search endpoint with segment snippets. Still to come: `/api/status`, `/api/index` + SSE + cancel, `/api/reset`, `/api/open`; see `CLAUDE.md` § HTTP API.
+Phases 1–5.1 complete: extraction, keyword index, vector index, hybrid retrieval, NL query parsing, CLI, and the evaluation harness. Phase 5.2 (HTTP API): **skeleton + `GET /api/search` + `POST /api/open` + index capability markers implemented 2026-07-15** — handshake, model lifecycle, `/api/health` (now capability-aware), auth, readiness gating, error envelope, search with segment snippets, and open with index-membership validation. Still to come: `/api/status`, `/api/index` + SSE + cancel, `/api/reset`; see `CLAUDE.md` § HTTP API.
 
 ### Package structure
 
@@ -93,13 +93,13 @@ src/oasis/
 ├── config.py
 ├── models.py
 ├── cli/app.py
-├── api/                 __init__, schemas, state, app, search, serve  ← Phase 5.2
+├── api/                 __init__, schemas, state, app, search, open, serve  ← Phase 5.2
 ├── extractors/          base, registry, text, pdf, docx, pptx, xlsx, csv
 ├── index/               db, keyword, vector, embeddings, chunker, walker, pipeline
 ├── llm/                 __init__, base, manager, ollama
 └── query/               __init__, parser, retriever, reranker, snippets, search
 
-tests/                   30 test modules, 854 tests
+tests/                   32 test modules, 879 tests
 ├── fixtures/            sample.{txt,md,pdf,docx,pptx,xlsx,csv}
 eval/
 ├── corpus/              301 labeled files + MANIFEST.md
@@ -134,8 +134,18 @@ Notes on the tree (verified against disk, not memory — this section had drifte
 Known gap: `eval/corpus/txt/edge-latin1-menu.txt` can't be read by the UTF-8-only text extractor. No query targets it, so eval scores are unaffected.
 
 ### Index layer — `index/`
-- **`db.py`** — `open_db(path)`: creates dirs, `journal_mode=WAL`, `synchronous=NORMAL`, runs schema. `documents` carries `title`/`content` because FTS5 `content=documents` fetches them by rowid. Three triggers (`_ai`/`_ad`/`_au`) keep FTS in sync.
-- **`keyword.py`** — `KeywordIndex`; **all SQL in the project lives here**. `_file_hash(size, mtime)` → SHA-256[:16], used by both `upsert` and `is_unchanged` so skip logic and storage can't drift. `upsert` uses `INSERT … ON CONFLICT DO UPDATE` (fires the UPDATE trigger). `search(query, limit, *, after, before, folders, extensions)` — FTS5 `MATCH` + dynamic parameterized WHERE; `snippet(…, char(2), char(3), …)` keeps SQL free of string interpolation. Also `count`, `last_indexed_at`, `get_doc_id`, `delete`. `Result`: `path`, `doc_id`, `title`, `snippet`, `rank`. `MATCH_START = "\x02"`, `MATCH_END = "\x03"`.
+- **`db.py`** — `open_db(path)`: creates dirs, `journal_mode=WAL`, `synchronous=NORMAL`, runs schema. `documents` carries `title`/`content` because FTS5 `content=documents` fetches them by rowid. Three triggers (`_ai`/`_ad`/`_au`) keep FTS in sync. Also a `meta(key, value)` table and `SCHEMA_VERSION = 1` (see Index capabilities below). `open_db` only *ensures* the meta table exists — it deliberately never infers markers from heuristics, because "absent" has to keep meaning "not known to be searchable" for every index built before the table existed.
+- **`keyword.py`** — `KeywordIndex`; **all SQL in the project lives here**. `_file_hash(size, mtime)` → SHA-256[:16], used by both `upsert` and `is_unchanged` so skip logic and storage can't drift. `upsert` uses `INSERT … ON CONFLICT DO UPDATE` (fires the UPDATE trigger). `search(query, limit, *, after, before, folders, extensions)` — FTS5 `MATCH` + dynamic parameterized WHERE; `snippet(…, char(2), char(3), …)` keeps SQL free of string interpolation. Also `count`, `last_indexed_at`, `get_doc_id`, `delete`, `set_meta`/`get_meta`/`get_capabilities`. `Result`: `path`, `doc_id`, `title`, `snippet`, `rank`. `MATCH_START = "\x02"`, `MATCH_END = "\x03"`.
+
+#### Index capabilities — telling "legacy index" apart from "no results" (2026-07-15)
+
+The problem: an index built before vectors existed returns nothing from semantic search, which is indistinguishable from "your query matched nothing" — so the app's first run reads a stale index as *broken*. Markers make it detectable.
+
+- **`IndexCapabilities`** (frozen dataclass in `keyword.py`, deliberately **not** an ApiModel — it's internal): `schema_version` (0 when absent), `vectors_built`, `embedding_model`, `embedding_dimension`, `document_count`. `get_capabilities()` is a **pure DB read** — it knows nothing about any live embedder, so the "were these vectors built at the dimension we now use?" comparison belongs to the caller, not here.
+- **Absence is conservative**: no marker → `vectors_built=False` → needs-reindex. **No backfill** of existing indexes; the pipeline populates markers going forward.
+- **`pipeline.py`** writes markers via `_write_capability_markers()` on *successful completion only*: `schema_version` always; `vectors_built`/`embedding_model`/`embedding_dimension` only when the embed phase actually ran. **Markers are only ever set, never cleared** — this is load-bearing: an incremental re-run with nothing new to embed skips the embed phase entirely, and must not downgrade an index whose vectors are fine (regression-tested). A cancelled or crashed run leaves markers absent → conservatively reads as needs-reindex.
+- `embedding_dimension` comes from the `EmbeddingModel` Protocol; the model *name* isn't on the Protocol, so it's read opportunistically via `getattr(embedder, "model_name", None)` — `SentenceTransformerEmbedder._model_name` became public `model_name` for this.
+- A corrupt marker (non-integer) reads as absent rather than crashing `/api/health`.
 - **`walker.py`** — `walk(root, *, extra_excludes, respect_gitignore, exclude_dotfiles, on_error)`. Layered cheapest-first: `_DIR_EXCLUDES` frozenset (prunes `dirnames` in place, never descends) → dotfile skip → pathspec `gitignore` spec. `followlinks=False`. Root-level `.gitignore` only. `on_error` is forwarded to `os.walk(onerror=…)` — **without it os.walk silently swallows directory-level errors**, so an unreadable tree yields nothing and looks identical to an empty one.
 - **`chunker.py`** — `chunk_document(text, *, chunk_size=500, overlap=50) -> list[Chunk]`. tiktoken `cl100k_base` (module-level `_ENC`), sliding window stepping `chunk_size - overlap`. Empty/whitespace → `[]`; raises `ValueError` on bad args.
 - **`embeddings.py`** — `EmbeddingModel` Protocol (`dimension`, `embed`). `SentenceTransformerEmbedder` wraps sentence-transformers with a module-level `_MODEL_CACHE` (load once per model name per process). Single `encode()` call, `show_progress_bar=False`. `DEFAULT_MODEL="all-MiniLM-L6-v2"` (384-dim).
@@ -189,6 +199,18 @@ Implements the non-endpoint half of the `CLAUDE.md` § HTTP API spec. `fastapi` 
 - **`query/search.py`** — `run_search(conn, vector_index, embedder, reranker, query, parsed, *, mode, limit)` returning `list[HybridResult]` for all three modes; `SearchMode(StrEnum)` lives here too (duplicates the CLI's enum until the CLI migrates to this module in a later commit — deliberate temporary duplication). Keyword score is `-rank` (FTS5 rank is negative-better), semantic score is `1 − distance` (cosine similarity), hybrid is RRF then CE. Hybrid reranks against the **user's raw query**, not `semantic_query` (the eval showed distillation corrupts meaning); identical when raw.
 - **`query/snippets.py: to_segments(marked) -> list[tuple[str, bool]]`** — pure sentinel-string→segments converter (no API/torch imports, property-testable in isolation). Guarantees: concatenation == input minus sentinels; no empty segments; adjacent equal-match runs merged; stray/unterminated sentinels stripped as unmatched (matches the CLI renderer). Zero-gap adjacent spans (real: `_highlight_terms` on `"aa"` with term `"a"`) merge, so the sentinel round-trip is canonical rather than byte-for-byte for those.
 - **`api/search.py`** — sync `def` (threadpool, per § Concurrency), on its own `APIRouter` included into `protected_router` at `app.py` module level (before `create_app`'s catch-all — registration-order invariant). `latency_ms` = `perf_counter()` around retrieval+rerank **only**, excluding the LLM parse, matching what the eval times. `ParsedQuerySchema.from_domain()` mirrors the domain `ParsedQuery` at the boundary so `ApiModel`'s serializer attaches UTC offsets to `date_range` (the domain model stays naive). Params: `q` (required, min_length=1), `mode` (SearchMode, default hybrid), `limit` (ge=1, default 10), `raw` (default true) — `Annotated[…, Query(…)]` style, which also avoids ruff B008. Whitespace-only `q` → `400` (would otherwise 500 in `ParsedQuery` validation).
+### `POST /api/open` — implemented (2026-07-15)
+
+Body `{path}`; opens an indexed file via `subprocess.run(["open", …])` (list form, never `shell=True`). Sync `def` (subprocess blocks → threadpool), on `protected_router`.
+
+- **`get_doc_id()` is the security boundary** — only files Oasis actually indexed can be opened, so an arbitrary path is a 404 rather than a launch. `404` not indexed → `410` indexed but gone from disk (distinct so the app can offer a reindex instead of saying "never heard of it") → `204` on success.
+- **🔑 Path normalization had to be resolved empirically, and the obvious answer is wrong both ways.** The pipeline stores whatever the walker yielded — `root` joined with each sub-path, **absolute but not symlink-resolved**. So:
+  - Resolving *only the request* misses every index built through a symlinked root (`oasis index /tmp/notes` stores `/tmp/notes/…`; `resolve()` says `/private/tmp/notes/…`).
+  - Matching *only the raw form* misses every request made through a symlink.
+  - So `_lookup_doc_id()` tries **both forms of the same request** and opens the resolved one (both name the same file). Each direction has its own test, and each naive implementation was **verified to fail exactly one of them** — a "absolute in, absolute stored" test passes while both symlink cases silently 404.
+  - Note for the record: the `/Users → /System/Volumes/Data/Users` worry does **not** bite on macOS — `/Users` is a *firmlink*, not a symlink, so `resolve()` leaves it alone (which is why the real index's stored paths happen to equal their resolved form). `/tmp → /private/tmp` is a real symlink, and that's the case that bites.
+- **Relative request paths → `400`.** `resolve()` on a relative path is relative to the *server's* CWD, which the client knows nothing about — it could match one document and open a different file. See the pipeline bug in Up Next: this is not hypothetical, `oasis index <relative-root>` really does store relative paths.
+
 - **Discovered live**: the real `~/.oasis/index.db` (877 docs, built June 3) **has no vector data** — it predates vector indexing, so semantic/hybrid return keyword-arm-only results against it, and the server's `VectorIndex` startup created an empty `~/.oasis/index.lance` today. A re-index populates it. Worth remembering for the app's first-run story: an old keyword-only index looks like "semantic search is broken."
 
 ### Config — `config.py`
@@ -269,9 +291,11 @@ The jump is entirely from splitting `hybrid_search`'s try blocks (below). 10 of 
 
 ---
 
-## Tests — 854, all passing
+## Tests — 879, all passing
 
 New 2026-07-15: `test_api_skeleton.py` (15) — loading→ready health transitions, load-failure → `status:"error"`, auth (401 envelope, missing/wrong token, health exempt), 503-while-loading envelope, **422 in envelope shape** (the FastAPI-generated one most likely to slip through), 500 envelope with no traceback leaked, thread-local SQLite (two threads, distinct connections, no `check_same_thread`), `invalidate()` reopens.
+
+Also new 2026-07-15: `test_api_open.py` (10) — 204 with exact `subprocess.run` args, **both symlink directions** (each proven to catch a different naive implementation), traversal → 404, relative → 400, unindexed → 404, indexed-but-deleted → 410, 404≠410, 401/422 envelopes, and `subprocess.run` never called on any non-204 path. `test_capabilities.py` (15) — meta round-trip + ON-CONFLICT-updates-in-place, fresh/legacy/vectored `get_capabilities()`, pipeline marker writes with and without an embedder, embedder without `model_name`, **incremental re-run doesn't downgrade `vectors_built`**, corrupt marker reads as absent, and the four `/api/health` cases (semantic_ready true, legacy → false with documents > 0, dimension mismatch → vectors_built true but semantic_ready false, loading → defaults).
 
 Also new 2026-07-15: `test_api_search.py` (18) — real SQLite+LanceDB over a 3-doc corpus with crc32-deterministic fake embeddings (no PyTorch): all three modes well-formed, raw-default skips the LLM entirely (spied `parse_query` + counting fake provider), `raw=false` happy/error/no-LLM paths, keyword-400 vs hybrid-200 vs semantic-200 on `"rock 'n roll"`, UTC-offset datetimes in `parsed.date_range`, zero matches → `[]`, limit/over-fetch via a top_n-capturing fake reranker, 422/401 envelopes, segment canonical-form on the wire. And `test_snippets.py` grew 8 `to_segments` tests including a seeded 600-case property test (canonical round-trip byte-for-byte; arbitrary sentinel soup keeps all invariants; re-parse idempotent; CJK/emoji/ZWJ/combining marks).
 
@@ -398,9 +422,13 @@ Landed ahead of the API so `api/` can be written against a stable pipeline:
 
 ## Up Next
 
-- **Implement the remaining HTTP API endpoints** — skeleton and `/api/search` (with segment snippets + property test) landed 2026-07-15; still to build against the `CLAUDE.md` spec: `/api/status`, `/api/index` + SSE events + cancel (`jobs.py`), `/api/reset` (use `state.invalidate()` + rebuild the shared `VectorIndex`), `/api/open`, and the search-during-index regression test. New endpoints go on `protected_router` (populated before `create_app` runs — catch-all shadows late additions).
+- **Implement the remaining HTTP API endpoints** — skeleton, `/api/search`, and `/api/open` landed 2026-07-15; still to build against the `CLAUDE.md` spec: `/api/status` (should consume the same `get_capabilities()` for its richer authenticated view), `/api/index` + SSE events + cancel (`jobs.py`), `/api/reset` (use `state.invalidate()` + rebuild the shared `VectorIndex`), and the search-during-index regression test. New endpoints go on `protected_router` (populated before `create_app` runs — catch-all shadows late additions).
+- **🔴 The pipeline stores relative paths when indexed with a relative root** — a real bug, found live 2026-07-15, pre-existing and not yet fixed. `oasis index eval/corpus/md` stores `eval/corpus/md/foo.md`, because the walker yields `root`-joined paths and nothing absolutizes `root`. Consequences:
+  1. **`/api/search` returns paths `/api/open` then rejects** (400, since a relative path is meaningless to a server whose CWD the client doesn't know) — an inconsistent API surface for any index built this way.
+  2. **Stored paths are CWD-ambiguous and can collide**: `oasis index .` from `/a` and from `/b` both store `notes.txt`, the same value in a `UNIQUE` column — the second silently overwrites the first's row.
+  - Fix: absolutize (probably `Path(root).resolve()`) at the pipeline/walker boundary so every stored path is absolute. Needs a reindex to take effect, and `/api/open`'s dual-form lookup can then collapse to one form. The real `~/.oasis` index is unaffected (0/877 relative — it was indexed with an absolute root); the scratch `legacy_copy.db` has 60/937 relative from my own live testing.
 - **Migrate the CLI's search command to `query/search.py:run_search()`** — the API already uses it; the CLI still carries its own copy of the mode dispatch (deliberate temporary duplication, one-engine direction). Decide then whether the CLI's rerank query moves from `semantic_query` to the raw query to match the API.
-- **The real `~/.oasis` index has no embeddings** (built June 3, pre-vector). Re-index to populate `index.lance`, and think about how the app detects/handles a keyword-only legacy index.
+- **The real `~/.oasis` index has no embeddings** (built June 3, pre-vector). Re-index to populate `index.lance`. **Detection is now handled** — `/api/health` reports `documents: 877, semantic_ready: false` against it (verified live 2026-07-15), so the app can prompt a reindex instead of showing a broken-looking empty state; what's left is the app-side UX for that prompt.
 - **🔴 Make the NL filters soft, and stop distilling the embedding query.** The measured headline finding (top of Evaluation): parsing costs −0.108 ndcg@10 / −0.135 recall@10 on hybrid+CE. Two fixes, both small:
   1. **Soft filters.** `_build_vec_where` / `_build_kw_filters` turn LLM guesses into hard `WHERE` exclusions, so one wrong guess zeroes a query's recall. Convert to a post-hoc score boost so a wrong guess costs a little and a right one still helps. This is an asymmetric-payoff problem, not a prompt problem — no amount of prompt-tuning fixes it.
   2. **Embed the original query, not `semantic_query`.** Distillation produced `'civic duty'` for the JFK inaugural and `'ocean pollution'` for coral bleaching. Keep `semantic_query` for the FTS5 arm (where it genuinely helps: keyword +0.040) and give the embedder the user's actual words.
@@ -414,6 +442,7 @@ Landed ahead of the API so `api/` can be written against a stable pipeline:
 - OCR fallback for scanned PDFs.
 
 ### Recently done (2026-07-15)
+- **`POST /api/open` + index capability markers** (one commit, two independent parts). Open validates against the index (`404`/`410`/`204`) with a dual-form path lookup that survives symlinks in either direction. Capabilities add a `meta` table, `SCHEMA_VERSION`, `get_capabilities()`, pipeline marker writes, and four new `/api/health` fields incl. `semantic_ready` (which catches the dimension-mismatch case). 25 new tests. **Verified live end-to-end**: the real 877-doc pre-vectors index reports `semantic_ready: false`; reindexing into a copy of it flipped that to `true` with `embedding_model: all-MiniLM-L6-v2, embedding_dimension: 384`. Found a pre-existing relative-path pipeline bug in the process (see Up Next).
 - **`GET /api/search`**: raw-by-default (the eval's finding made policy), keyword-400/hybrid-200 error contract, segment snippets via pure `to_segments`, `run_search` extracted to `query/search.py`, `latency_ms` measured warm around retrieval only. 26 new tests. Verified live against an indexed eval corpus in all three modes. Details under "`GET /api/search`" above.
 - **HTTP API server skeleton** (`src/oasis/api/`): handshake, background model loading + warmup, `/api/health`, bearer auth, readiness gating, error envelope, auth-gated 404 catch-all, `oasis serve` command, 15 tests. Details under "HTTP API — `api/`" above. Remaining endpoints are separate commits.
 

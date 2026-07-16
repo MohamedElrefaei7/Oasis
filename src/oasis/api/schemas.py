@@ -45,6 +45,21 @@ class HealthResponse(ApiModel):
     documents: int | None  # null while loading, or when no index exists
     error: str | None  # message when status == "error"
 
+    # Index capabilities — lets the app tell "this index predates vectors, tell
+    # the user to reindex" apart from "semantic search returned nothing".
+    # Null/false while loading, same as documents.
+    vectors_built: bool = False
+    embedding_model: str | None = None
+    embedding_dimension: int | None = None
+    # vectors_built AND they were built at the dimension the live embedder uses.
+    # A dimension mismatch means the stored vectors are unusable even though
+    # they exist, so this is what the app should gate its search box on.
+    semantic_ready: bool = False
+
+
+class OpenRequest(ApiModel):
+    path: str
+
 
 class ErrorDetail(ApiModel):
     code: str

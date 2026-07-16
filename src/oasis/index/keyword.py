@@ -27,6 +27,23 @@ class Result:
     rank: float
 
 
+@dataclass(frozen=True)
+class IndexCapabilities:
+    """What an index on disk supports. Internal — the API mirrors it at its boundary.
+
+    Every field is read from the DB alone: this deliberately knows nothing
+    about any live embedder, so "were the vectors built at the dimension we
+    now use?" is the caller's comparison to make, not this dataclass's.
+    """
+
+    # 0 for any index built before the meta table existed.
+    schema_version: int
+    vectors_built: bool
+    embedding_model: str | None
+    embedding_dimension: int | None
+    document_count: int
+
+
 class KeywordIndex:
     """All keyword-index SQL lives here. No SQL anywhere else in the index layer."""
 
@@ -69,6 +86,16 @@ class KeywordIndex:
                 doc.text,
                 json.dumps(m.model_dump(exclude_none=True)),
             ),
+        )
+        self._conn.commit()
+
+    def set_meta(self, key: str, value: str) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO meta (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (key, value),
         )
         self._conn.commit()
 
@@ -152,6 +179,36 @@ class KeywordIndex:
             )
             for row in rows
         ]
+
+    def get_meta(self, key: str) -> str | None:
+        row = self._conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        return row["value"] if row else None
+
+    def get_capabilities(self) -> IndexCapabilities:
+        """Read this index's capability markers. Pure DB read, no live models.
+
+        Absence is conservative: an index with no markers reads as
+        ``vectors_built=False`` / ``schema_version=0``, i.e. "needs a reindex",
+        which is exactly what a legacy keyword-only index is.
+        """
+        def _int(key: str) -> int | None:
+            value = self.get_meta(key)
+            if value is None:
+                return None
+            try:
+                return int(value)
+            except ValueError:
+                # A corrupt marker means we can't trust it; treat it as absent
+                # rather than propagating a crash into /api/health.
+                return None
+
+        return IndexCapabilities(
+            schema_version=_int("schema_version") or 0,
+            vectors_built=self.get_meta("vectors_built") == "true",
+            embedding_model=self.get_meta("embedding_model"),
+            embedding_dimension=_int("embedding_dimension"),
+            document_count=self.count(),
+        )
 
     def count(self) -> int:
         row = self._conn.execute("SELECT COUNT(*) FROM documents").fetchone()

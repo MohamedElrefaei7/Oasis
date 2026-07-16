@@ -1,6 +1,11 @@
 import sqlite3
 from pathlib import Path
 
+# What the current schema guarantees: documents + FTS + vector chunks. An index
+# built before the meta table exists has no schema_version row and reads as 0.
+# Bump when a change requires a reindex to be usable.
+SCHEMA_VERSION = 1
+
 # title and content must exist in `documents` because the FTS virtual table
 # uses content=documents — SQLite fetches those columns by rowid on query.
 _SCHEMA = """\
@@ -16,6 +21,15 @@ CREATE TABLE IF NOT EXISTS documents (
     title        TEXT,
     content      TEXT,
     metadata_json TEXT
+);
+
+-- Capability markers, written by the pipeline on a successful index run.
+-- open_db only ensures the table exists: it must never infer markers from
+-- heuristics, because "absent" has to keep meaning "not known to be
+-- searchable" for every index built before this table existed.
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(

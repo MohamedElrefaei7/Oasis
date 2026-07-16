@@ -18,6 +18,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from oasis.api.open import router as open_router
 from oasis.api.schemas import ErrorDetail, ErrorResponse, HealthResponse
 from oasis.api.search import router as search_router
 from oasis.api.state import AppState, get_conn
@@ -144,6 +145,7 @@ PROTECTED = [Depends(require_auth), Depends(require_ready)]
 # because the catch-all registered there shadows anything added later.
 protected_router = APIRouter(prefix="/api", dependencies=PROTECTED)
 protected_router.include_router(search_router)
+protected_router.include_router(open_router)
 
 
 # ---------------------------------------------------------------------------
@@ -203,16 +205,39 @@ def create_app(*, token: str, db_path: Path | None = None) -> FastAPI:
     @app.get("/api/health", response_model=HealthResponse)
     def health(request: Request) -> HealthResponse:
         # No auth: this is what the Swift app polls right after the handshake,
-        # and it exposes nothing sensitive (db_path lives on /api/status).
+        # and it exposes nothing sensitive — counts and a model name, no paths,
+        # no query text, no content. (db_path lives on /api/status.)
         state: AppState = request.app.state.oasis
-        documents: int | None = None
-        if state.status == "ready" and state.db_path is not None and state.db_path.exists():
-            documents = KeywordIndex(get_conn(state.db_path)).count()
+        version = importlib.metadata.version("oasis")
+        # While loading (or on error) the fields stay null/false, same as
+        # documents already behaved — there's no embedder to compare against yet.
+        if state.status != "ready" or state.db_path is None or not state.db_path.exists():
+            return HealthResponse(
+                status=state.status,
+                version=version,
+                documents=None,
+                error=state.error,
+            )
+
+        caps = KeywordIndex(get_conn(state.db_path)).get_capabilities()
+        # get_capabilities() is DB-only by design; the live embedder comparison
+        # belongs here, where the loaded model is known. Vectors built at a
+        # different dimension are unusable, so they don't count as ready.
+        live_dimension = state.embedder.dimension if state.embedder is not None else None
+        semantic_ready = (
+            caps.vectors_built
+            and caps.embedding_dimension is not None
+            and caps.embedding_dimension == live_dimension
+        )
         return HealthResponse(
             status=state.status,
-            version=importlib.metadata.version("oasis"),
-            documents=documents,
+            version=version,
+            documents=caps.document_count,
             error=state.error,
+            vectors_built=caps.vectors_built,
+            embedding_model=caps.embedding_model,
+            embedding_dimension=caps.embedding_dimension,
+            semantic_ready=semantic_ready,
         )
 
     app.include_router(protected_router)

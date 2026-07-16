@@ -9,6 +9,7 @@ from pathlib import Path
 
 from oasis.extractors.registry import get_extractor
 from oasis.index.chunker import Chunk, chunk_document
+from oasis.index.db import SCHEMA_VERSION
 from oasis.index.embeddings import EmbeddingModel
 from oasis.index.keyword import KeywordIndex
 from oasis.index.vector import ChunkRow, VectorIndex
@@ -47,6 +48,26 @@ def _is_unreadable(path: Path) -> bool:
         return True
     except OSError:
         return False
+
+
+def _write_capability_markers(idx: KeywordIndex, embedder: EmbeddingModel | None) -> None:
+    """Record what this index supports. Only called on successful completion.
+
+    Markers are only ever *set*, never cleared: an incremental re-run with
+    nothing new to embed doesn't reach the embed phase, and must not downgrade
+    an index whose vectors are perfectly good. Absence keeps meaning "unknown",
+    so a cancelled or crashed run conservatively reads as needs-reindex.
+    """
+    idx.set_meta("schema_version", str(SCHEMA_VERSION))
+    if embedder is None:
+        return
+    idx.set_meta("vectors_built", "true")
+    idx.set_meta("embedding_dimension", str(embedder.dimension))
+    # dimension is on the EmbeddingModel Protocol; the model's name is not, so
+    # read it opportunistically — a custom embedder needn't provide one.
+    model_name = getattr(embedder, "model_name", None)
+    if model_name:
+        idx.set_meta("embedding_model", str(model_name))
 
 
 def index_directory(
@@ -196,6 +217,10 @@ def index_directory(
     # Phase 2: embed + vector upsert
     # -----------------------------------------------------------------------
     if not (do_embed and pending):
+        # The embed phase didn't run — either no embedder, or nothing new to
+        # embed. Record the schema version but don't claim vectors: if a prior
+        # run built them, its marker is still there and stays true.
+        _write_capability_markers(idx, None)
         return stats
 
     assert vector_index is not None
@@ -242,4 +267,5 @@ def index_directory(
         if on_chunks_progress:
             on_chunks_progress(done, total)
 
+    _write_capability_markers(idx, embedder)
     return stats
