@@ -22,6 +22,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from oasis.api.index import router as index_router
 from oasis.api.open import router as open_router
+from oasis.api.reset import router as reset_router
 from oasis.api.schemas import ErrorDetail, ErrorResponse, HealthResponse
 from oasis.api.search import router as search_router
 from oasis.api.state import AppState, get_conn
@@ -162,6 +163,7 @@ protected_router.include_router(status_router)
 protected_router.include_router(search_router)
 protected_router.include_router(open_router)
 protected_router.include_router(index_router)
+protected_router.include_router(reset_router)
 
 
 # ---------------------------------------------------------------------------

@@ -108,6 +108,30 @@ class KeywordIndex:
         )
         self._conn.commit()
 
+    def clear_documents(self) -> None:
+        """Delete every document row (the ``_ad`` trigger clears FTS per row).
+
+        The document half of ``POST /api/reset``. Ordered *after* the vector
+        drop in ``AppState.reset_index`` so a crash mid-reset never leaves a
+        live document row whose semantic arm points at a dropped vector table.
+        """
+        self._conn.execute("DELETE FROM documents")
+        self._conn.commit()
+
+    def clear_meta(self) -> None:
+        """Delete every capability marker (``vectors_built``, ``schema_version``,
+        ``indexed_roots``, …).
+
+        The first step of ``POST /api/reset``, run *before* the vectors are
+        dropped so no ``vectors_built`` marker ever outlives the vectors it
+        describes — the intermediate state then reads as "reindex needed"
+        (markers absent → ``schema_version`` 0), never "semantic ready with no
+        vectors", which is the one dishonest state a crash could otherwise
+        leave behind.
+        """
+        self._conn.execute("DELETE FROM meta")
+        self._conn.commit()
+
     # ------------------------------------------------------------------
     # Reads
     # ------------------------------------------------------------------

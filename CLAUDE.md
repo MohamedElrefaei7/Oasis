@@ -329,13 +329,18 @@ data: {"type": "done", "job_id": "b1f4...", "stats": {"indexed": 812, "skipped":
 
 > **Pipeline support for this is already in place** — `index_directory()` takes `cancel: threading.Event | None = None` and checks it in the per-file loop and between embed batches, returning partial stats. Committed work stays committed; indexing is incremental, so the next run resumes where the cancelled one stopped.
 
-#### `POST /api/reset`
+#### `POST /api/reset` — **implemented (`api/reset.py`, `AppState.reset_index`, 2026-07-17)**
 ```jsonc
 { "confirm": true }   // required — replaces the CLI's interactive typer.confirm prompt
 ```
-`400` if `confirm` isn't `true` (no interactive prompt over HTTP, so confirmation must be explicit). `409` if an index job is running — reset takes the same single-job lock. `404` if no index exists. `204` on success.
+`400` if `confirm` isn't `true` (no interactive prompt over HTTP, so confirmation must be explicit — a bare/empty body must not be able to nuke the index). `409` if an index job is running — reset takes the **same `job_lock`** as `/api/index`, held across the whole reset so no job can start mid-swap. `404` if no index exists at `db_path`. `204` on success. Post-reset the index is empty and ready: `/api/status` → `200` with `documents: 0` and markers cleared, `/api/search` → `200` `[]`, and a subsequent `/api/index` populates a fresh index — **no server restart**.
 
-Deletes the SQLite DB, its `-wal`/`-shm` companions, and the `.lance` directory. **Then rebuilds app state's `VectorIndex`** — the cached instance holds a handle to a table that no longer exists. Construct a new `VectorIndex` (which re-runs `create_table(exist_ok=True)`); `checkout_latest()` is not enough here, since the versions it would check out are gone with the directory. Same for the thread-local SQLite connections: mark them stale so each thread reopens on next use.
+**The deletion is trivial; the commit is the swap.** `VectorIndex` is one shared handle every search reads and the index job writes through — that sharing is *why* search-during-index returns fresh rows (§ Concurrency › LanceDB). Reset destroys and replaces that handle while searches may be mid-flight against it, so `AppState.reset_index()` (called under the lock) is written around that inversion:
+
+- **In-flight searches degrade, never crash.** A search on a threadpool thread holds the OLD `VectorIndex` for the life of its call (it was passed the reference before reset ran). When reset `rmtree`s that handle's `.lance` directory, its next `.search()` raises a LanceDB `RuntimeError` (an IO error — files vanished), which the hybrid **vector arm already catches** (`query/retriever.py`, `except Exception`) and degrades to keyword-only. A search racing a reset returns a valid pre-reset result or a valid empty post-reset result — **never a `500`, never a torn read.** Only *subsequent* searches read the new handle, which is why `api/search.py` reads `state.vector_index` fresh per request, never captured at startup.
+- **Rebuild, don't `checkout_latest`.** After `rmtree`, construct a fresh `VectorIndex` (re-runs `create_table(exist_ok=True)`) and install it as the shared instance — the versions `checkout_latest()` would restore are gone with the directory.
+- **Deletion order is markers → vectors → documents**, so no `vectors_built` marker ever outlives the vectors it describes. A crash between any two steps lands in the conservative, honest "reindex needed" state (documents present, markers gone → `schema_version` 0 → `reindex_recommended: true`), never the one dishonest state, "semantic ready with no vectors".
+- **SQLite is cleared in place, not unlinked** — `KeywordIndex.clear_meta()` + `clear_documents()` (the `_ad` trigger clears FTS), which is safer for in-flight readers than deleting a file out from under open connections and leaves `/api/status` reporting a true empty index (`200`, 0 docs) rather than a `404`. The thread-locals are then `invalidate()`d (the WAL clear is already cross-thread-visible; this forces a clean reopen).
 
 #### `POST /api/open`
 ```jsonc

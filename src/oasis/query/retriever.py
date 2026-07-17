@@ -143,6 +143,13 @@ def hybrid_search(
         query_vec: np.ndarray = embedder.embed([parsed.semantic_query])[0]
         vec_raw = vector_index.search(query_vec, limit=candidate_limit, where=vec_where)
     except Exception as exc:
+        # Deliberately broad. Besides embedder/LanceDB faults, this catches the
+        # POST /api/reset race: reset can rmtree this handle's table out from
+        # under a live reader, and LanceDB then raises (a RuntimeError wrapping
+        # an IO error) when .search() opens files that just vanished. Swallowing
+        # it here is what keeps a search racing a reset a clean keyword-only
+        # degrade instead of a 500 with a torn-read traceback — the in-flight
+        # half of the shared-handle swap (see AppState.reset_index).
         logger.warning("Vector arm failed (%s); degrading to keyword-only", exc, exc_info=True)
         vec_error = exc
 

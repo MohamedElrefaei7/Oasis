@@ -7,6 +7,7 @@ the LanceDB handle are shared. Getting either one backwards fails silently.
 
 from __future__ import annotations
 
+import shutil
 import sqlite3
 import threading
 from dataclasses import dataclass, field
@@ -17,6 +18,7 @@ from oasis.api.jobs import EventBroker, IndexJob
 from oasis.config import OasisConfig
 from oasis.index.db import open_db
 from oasis.index.embeddings import EmbeddingModel
+from oasis.index.keyword import KeywordIndex
 from oasis.index.vector import VectorIndex
 from oasis.llm.base import LLMProvider
 from oasis.query.reranker import CrossEncoderReranker
@@ -57,6 +59,60 @@ class AppState:
     job_lock: threading.Lock = field(default_factory=threading.Lock)
     # Fan-out to SSE subscribers; its event loop is bound in lifespan startup.
     broker: EventBroker = field(default_factory=EventBroker)
+
+    def reset_index(self) -> None:
+        """Delete the index in place and stand up a fresh empty one, swapping in
+        a new shared ``VectorIndex`` handle.
+
+        **The caller MUST hold ``job_lock`` and have verified no job is
+        running.** This drops the very LanceDB handle the index job writes
+        through, so reset and indexing are mutually exclusive by that lock — the
+        same lock, for the same reason a second ``POST /api/index`` is refused.
+
+        The inversion this method has to survive: four commits made
+        ``vector_index`` one shared handle every search reads and the job writes
+        through, and *that* is why search-during-index sees fresh rows. Reset
+        destroys and replaces that handle while searches may be mid-flight
+        against it. Two properties make that safe:
+
+        1. **In-flight readers degrade, they don't crash.** A search on a
+           threadpool thread holds the OLD handle for the life of its call (it
+           was passed the reference before this ran). When the ``rmtree`` below
+           removes that handle's files, its next ``.search()`` raises, and the
+           hybrid vector arm catches it and degrades to keyword-only
+           (``query/retriever.py``). Only *subsequent* searches read the new
+           handle from ``self.vector_index`` — which is why ``api/search.py``
+           reads ``state.vector_index`` fresh per request, never captured once.
+        2. **Deletion order keeps the markers honest at every crash point.**
+           markers → vectors → documents, so no ``vectors_built`` marker ever
+           outlives the vectors it describes. A crash between any two steps
+           lands in the conservative "reindex needed" state (documents present,
+           markers gone → ``schema_version`` 0), never the one dishonest state,
+           "semantic ready with no vectors".
+        """
+        assert self.db_path is not None and self.embedder is not None  # ready ⇒ loaded
+        idx = KeywordIndex(get_conn(self.db_path))
+
+        # 1. Markers first — after this the index reads reindex-needed, so the
+        #    vector drop below can't leave a marker claiming vectors that vanish.
+        idx.clear_meta()
+
+        # 2. Vector store: rmtree the directory, then reconstruct. checkout_latest
+        #    can't help — the versions it would check out are gone with the dir;
+        #    only a fresh VectorIndex binds the new empty table. Install it as THE
+        #    shared instance so every subsequent search/index gets the new handle.
+        lance_path = self.db_path.with_name(self.db_path.stem + ".lance")
+        if lance_path.exists():
+            shutil.rmtree(lance_path)
+        self.vector_index = VectorIndex(lance_path, dimension=self.embedder.dimension)
+
+        # 3. Documents last (the _ad trigger clears FTS). Now 0 rows everywhere.
+        idx.clear_documents()
+
+        # 4. The SQL clears are already visible cross-thread via WAL, but bump the
+        #    generation so every thread reopens on next use — a clean reopen and
+        #    consistent with treating reset as "the index is gone, start over".
+        invalidate()
 
 
 # --------------------------------------------------------------------------

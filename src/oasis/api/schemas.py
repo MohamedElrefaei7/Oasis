@@ -111,6 +111,15 @@ class OpenRequest(ApiModel):
     path: str
 
 
+class ResetRequest(ApiModel):
+    """Body of POST /api/reset. Explicit confirmation is required — reset is
+    irreversible and there is no interactive prompt over HTTP (it replaces the
+    CLI's ``typer.confirm``), so a bare/empty body must not be able to nuke the
+    index. ``confirm`` defaults False so ``{}`` yields a clean 400, not a 422."""
+
+    confirm: bool = False
+
+
 class ErrorDetail(ApiModel):
     code: str
     message: str
