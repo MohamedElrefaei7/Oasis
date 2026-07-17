@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -213,6 +214,22 @@ class KeywordIndex:
     def count(self) -> int:
         row = self._conn.execute("SELECT COUNT(*) FROM documents").fetchone()
         return row[0]
+
+    def docs_under(self, root: str) -> list[tuple[int, str]]:
+        """(doc_id, path) for every stored document under directory *root*.
+
+        The authoritative filter is the Python separator-boundary check, NOT
+        SQL LIKE: paths routinely contain ``_``, which LIKE treats as a
+        single-char wildcard, so ``LIKE '/tmp/a/%'`` silently over-matches —
+        and a bare prefix check would put ``/tmp/ab/...`` "under" ``/tmp/a``.
+        *root* must be the abspath form the pipeline stores (it is the sweep's
+        deletion scope, so over-matching here deletes someone else's rows).
+        """
+        prefix = root if root.endswith(os.sep) else root + os.sep
+        rows = self._conn.execute("SELECT id, path FROM documents").fetchall()
+        return [
+            (row["id"], row["path"]) for row in rows if row["path"].startswith(prefix)
+        ]
 
     def count_stale(self) -> int:
         """Count indexed documents whose file no longer exists on disk.

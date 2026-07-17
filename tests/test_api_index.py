@@ -534,6 +534,43 @@ def test_event_datetimes_carry_utc_offset(client, corpus):
         assert value.endswith("+00:00") or value.endswith("Z"), f"naive datetime: {value}"
 
 
+def test_reconciling_phase_and_removed_count_over_sse(client, corpus, monkeypatch):
+    """A reindex after an on-disk deletion emits the `reconciling` phase and a
+    terminal `done` whose stats carry `removed: 1`; the swept doc then returns
+    from neither search arm."""
+    # The reconciling progress event is a blink and would usually be coalesced
+    # away by the 100ms throttle; disable throttling so the phase is observable.
+    monkeypatch.setattr("oasis.api.jobs.PROGRESS_THROTTLE_S", 0.0)
+
+    r = client.post("/api/index", json={"root": str(corpus)}, headers=AUTH)
+    assert r.status_code == 202
+    assert _wait(lambda: client.app_state.index_job.status == "done")
+
+    (corpus / "b.txt").unlink()  # the doc holding the distinctive token
+    go, _ = _gate(monkeypatch)  # subscribe first, then release — no missed events
+    client.post("/api/index", json={"root": str(corpus)}, headers=AUTH)
+    with client.stream("GET", "/api/index/events", headers=AUTH) as s:
+        lines = s.iter_lines()
+        assert _next_event(lines)["type"] == "snapshot"
+        go.set()
+        events = _read_until(lines, TERMINAL)
+
+    done = next(e for e in events if e["type"] == "done")
+    assert done["stats"]["removed"] == 1
+    phases = {e.get("phase") for e in events if e["type"] == "progress"}
+    assert "reconciling" in phases, f"reconciling phase never emitted (saw {phases})"
+
+    # Neither arm returns the swept doc.
+    for mode in ("keyword", "hybrid"):
+        hits = client.get(
+            "/api/search", params={"q": "zqxwomble", "mode": mode}, headers=AUTH
+        )
+        assert hits.status_code == 200
+        assert all(not res["path"].endswith("b.txt") for res in hits.json()["results"]), (
+            f"swept doc still surfaced via {mode}"
+        )
+
+
 # ==========================================================================
 # Part C — cancel
 # ==========================================================================

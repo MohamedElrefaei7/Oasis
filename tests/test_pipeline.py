@@ -26,7 +26,7 @@ def conn(tmp_path: Path) -> sqlite3.Connection:
 def test_returns_all_stat_keys(conn: sqlite3.Connection, tmp_path: Path) -> None:
     stats = index_directory(conn, tmp_path)
     assert set(stats.keys()) == {
-        "indexed", "skipped", "failed", "unsupported", "permission_denied", "chunks",
+        "indexed", "skipped", "failed", "unsupported", "permission_denied", "chunks", "removed",
     }
 
 
@@ -34,7 +34,7 @@ def test_empty_directory_all_zeros(conn: sqlite3.Connection, tmp_path: Path) -> 
     stats = index_directory(conn, tmp_path)
     assert stats == {
         "indexed": 0, "skipped": 0, "failed": 0,
-        "unsupported": 0, "permission_denied": 0, "chunks": 0,
+        "unsupported": 0, "permission_denied": 0, "chunks": 0, "removed": 0,
     }
 
 
@@ -233,7 +233,14 @@ def _fake_embedder(dim: int = 4) -> MagicMock:
 
 
 def _fake_vector_index() -> MagicMock:
-    return MagicMock(spec=VectorIndex)
+    # Stateful: doc_ids_with_vectors reports exactly what was upserted, so the
+    # pipeline's unchanged-and-vectored skip (no-vector backfill) behaves as it
+    # does against real LanceDB while calls stay spy-able.
+    m = MagicMock(spec=VectorIndex)
+    ids: set[int] = set()
+    m.upsert_chunks.side_effect = lambda rows: ids.update(r.doc_id for r in rows)
+    m.doc_ids_with_vectors.side_effect = lambda: set(ids)
+    return m
 
 
 # ---------------------------------------------------------------------------
@@ -644,3 +651,240 @@ def test_cancel_resume_is_idempotent_doc_count_matches_walk(
 
     assert stats_cancelled["indexed"] < walked_indexable  # the cancel really bit
     assert count_all == count_distinct == walked_indexable
+
+
+# ---------------------------------------------------------------------------
+# Stale-document reconciliation (the sweep) — every test here is adversarial:
+# the sweep DELETES stored data, so each one is written to go red on a real
+# bug (missing separator boundary, missing census gate, cross-root leakage).
+# Real SQLite + real LanceDB; only the embedder is fake (deterministic, no
+# torch).
+# ---------------------------------------------------------------------------
+
+
+class _CountingEmbedder:
+    """Minimal real EmbeddingModel: spy-able calls, real name for markers."""
+
+    dimension = 4
+    model_name = "fake-model"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def embed(self, texts: list[str]) -> np.ndarray:
+        self.calls += 1
+        return np.zeros((len(texts), self.dimension), dtype=np.float32)
+
+
+@pytest.fixture
+def stores(tmp_path: Path):
+    """(conn, vector_index, embedder) over real backends, under a dotdir the
+    walker never descends into."""
+    conn = open_db(tmp_path / ".db" / "test.db")
+    vi = VectorIndex(tmp_path / ".db" / "test.lance", dimension=4)
+    return conn, vi, _CountingEmbedder()
+
+
+def test_sweep_removes_deleted_file_from_all_stores(stores, tmp_path: Path) -> None:
+    """Test 1 + 7: a file deleted from disk is swept from SQLite, FTS, and the
+    vector store on a plain (non-force) reindex; survivors are untouched, and
+    the swept doc returns from neither search arm."""
+    conn, vi, emb = stores
+    for name in ("a", "b", "c"):
+        (tmp_path / f"{name}.txt").write_text(f"{name} distinctive zq{name}token content")
+    index_directory(conn, tmp_path, vector_index=vi, embedder=emb)
+    idx = KeywordIndex(conn)
+    doomed_id = idx.get_doc_id(tmp_path / "c.txt")
+    assert doomed_id is not None and doomed_id in vi.doc_ids_with_vectors()
+
+    (tmp_path / "c.txt").unlink()
+    stats = index_directory(conn, tmp_path, vector_index=vi, embedder=emb)
+
+    assert stats["removed"] == 1
+    assert idx.get_doc_id(tmp_path / "c.txt") is None
+    assert idx.get_doc_id(tmp_path / "a.txt") is not None
+    assert idx.get_doc_id(tmp_path / "b.txt") is not None
+    # Keyword arm (FTS row gone via the _ad trigger):
+    assert idx.search("zqctoken") == []
+    # Semantic arm (no orphaned vectors to surface stale hits):
+    assert doomed_id not in vi.doc_ids_with_vectors()
+
+
+def test_sweep_sibling_prefix_isolation(stores, tmp_path: Path) -> None:
+    """Test 2: reindexing /x/a must never sweep /x/ab — goes red on a missing
+    separator boundary (bare prefix match) or a LIKE-wildcard filter."""
+    conn, vi, emb = stores
+    root_a = tmp_path / "a"
+    root_ab = tmp_path / "ab"
+    root_a.mkdir()
+    root_ab.mkdir()
+    (root_a / "inside.txt").write_text("inside the a root")
+    (root_ab / "sibling.txt").write_text("inside the ab sibling root")
+    index_directory(conn, root_a, vector_index=vi, embedder=emb)
+    index_directory(conn, root_ab, vector_index=vi, embedder=emb)
+
+    stats = index_directory(conn, root_a, vector_index=vi, embedder=emb)
+
+    assert stats["removed"] == 0
+    assert KeywordIndex(conn).get_doc_id(root_ab / "sibling.txt") is not None
+
+
+def test_sweep_skipped_on_permission_denied_subtree(stores, tmp_path: Path) -> None:
+    """Test 3 — the mass-deletion landmine: a chmod-000 subdir yields a walk
+    that COMPLETES but never saw that subtree. Sweeping would silently delete
+    every doc under a folder we merely couldn't read this run."""
+    conn, vi, emb = stores
+    (tmp_path / "top.txt").write_text("top level doc")
+    sub = tmp_path / "locked"
+    sub.mkdir()
+    (sub / "precious.txt").write_text("indexed then locked away")
+    index_directory(conn, tmp_path, vector_index=vi, embedder=emb)
+    precious_id = KeywordIndex(conn).get_doc_id(sub / "precious.txt")
+    assert precious_id is not None
+
+    sub.chmod(0o000)
+    try:
+        stats = index_directory(conn, tmp_path, vector_index=vi, embedder=emb)
+    finally:
+        sub.chmod(0o755)
+
+    assert stats["permission_denied"] > 0  # the census really was dirty
+    assert stats["removed"] == 0
+    assert KeywordIndex(conn).get_doc_id(sub / "precious.txt") is not None
+    assert precious_id in vi.doc_ids_with_vectors()
+
+
+def test_sweep_skipped_on_cancel(stores, tmp_path: Path) -> None:
+    """Test 4: a cancelled reindex has an incomplete seen-set — everything past
+    the cancel point would look 'unseen'. It must delete nothing."""
+    import threading
+
+    conn, vi, emb = stores
+    for i in range(10):
+        (tmp_path / f"f{i:02d}.txt").write_text(f"cancellable content {i}")
+    index_directory(conn, tmp_path, vector_index=vi, embedder=emb)
+    (tmp_path / "f09.txt").unlink()  # genuinely stale — but the run is cancelled
+
+    cancel = threading.Event()
+
+    def cancel_early(path: Path, status: str) -> None:
+        cancel.set()  # cancel after the very first file
+
+    stats = index_directory(
+        conn, tmp_path, vector_index=vi, embedder=emb, cancel=cancel, on_file=cancel_early
+    )
+
+    assert stats["removed"] == 0
+    # The stale doc SURVIVES — reconciling it is the next complete run's job.
+    assert KeywordIndex(conn).get_doc_id(tmp_path / "f09.txt") is not None
+
+
+def test_sweep_reconciles_rename(stores, tmp_path: Path) -> None:
+    """Test 5: a rename is a delete at the old path plus an add at the new one
+    — which disk-existence checks (count_stale) can never see, because the old
+    row's file is 'gone' only in the sense that its path moved."""
+    conn, vi, emb = stores
+    (tmp_path / "old-name.txt").write_text("stable content that moves")
+    index_directory(conn, tmp_path, vector_index=vi, embedder=emb)
+
+    (tmp_path / "old-name.txt").rename(tmp_path / "new-name.txt")
+    stats = index_directory(conn, tmp_path, vector_index=vi, embedder=emb)
+
+    idx = KeywordIndex(conn)
+    assert stats["removed"] == 1
+    assert idx.get_doc_id(tmp_path / "old-name.txt") is None
+    assert idx.get_doc_id(tmp_path / "new-name.txt") is not None
+    assert idx.count() == 1
+
+
+def test_sweep_reconciles_new_exclude(stores, tmp_path: Path) -> None:
+    """Test 5b: a file newly covered by excludes was 'seen by disk' but not by
+    the walk — the sweep removes its stale row."""
+    conn, vi, emb = stores
+    (tmp_path / "keep.txt").write_text("keep this one")
+    (tmp_path / "drop.txt").write_text("exclude this one later")
+    index_directory(conn, tmp_path, vector_index=vi, embedder=emb)
+
+    stats = index_directory(
+        conn, tmp_path, vector_index=vi, embedder=emb, extra_excludes=["drop.txt"]
+    )
+
+    assert stats["removed"] == 1
+    assert KeywordIndex(conn).get_doc_id(tmp_path / "drop.txt") is None
+    assert KeywordIndex(conn).get_doc_id(tmp_path / "keep.txt") is not None
+
+
+def test_sweep_cross_root_isolation(stores, tmp_path: Path) -> None:
+    """Test 6: reindexing one root never sweeps another root's docs, even when
+    the other root has genuinely stale rows."""
+    conn, vi, emb = stores
+    r1, r2 = tmp_path / "roots" / "one", tmp_path / "roots" / "two"
+    r1.mkdir(parents=True)
+    r2.mkdir(parents=True)
+    (r1 / "one.txt").write_text("first root doc")
+    (r2 / "two.txt").write_text("second root doc")
+    index_directory(conn, r1, vector_index=vi, embedder=emb)
+    index_directory(conn, r2, vector_index=vi, embedder=emb)
+
+    (r2 / "two.txt").unlink()  # stale under r2 — but we reindex r1
+    stats = index_directory(conn, r1, vector_index=vi, embedder=emb)
+
+    assert stats["removed"] == 0
+    assert KeywordIndex(conn).get_doc_id(r2 / "two.txt") is not None
+
+
+# ---------------------------------------------------------------------------
+# No-vector backfill
+# ---------------------------------------------------------------------------
+
+
+def test_plain_reindex_backfills_keyword_only_index(stores, tmp_path: Path) -> None:
+    """Test 8: the real ~/.oasis repair. An index built before vectors gets its
+    vectors populated by a PLAIN reindex — no --force required."""
+    from oasis.index.db import SCHEMA_VERSION
+
+    conn, vi, emb = stores
+    for i in range(3):
+        (tmp_path / f"doc{i}.txt").write_text(f"pre-vector era content {i}")
+    index_directory(conn, tmp_path)  # keyword-only: no embedder, no vectors
+    assert vi.count() == 0
+    assert KeywordIndex(conn).get_capabilities().vectors_built is False
+
+    stats = index_directory(conn, tmp_path, vector_index=vi, embedder=emb)
+
+    assert stats["chunks"] > 0 and vi.count() > 0
+    caps = KeywordIndex(conn).get_capabilities()
+    assert caps.vectors_built is True
+    assert caps.embedding_dimension == emb.dimension  # semantic_ready's comparison
+    assert caps.schema_version == SCHEMA_VERSION  # reindex_recommended flips false
+
+
+def test_fully_vectored_unchanged_corpus_re_embeds_nothing(stores, tmp_path: Path) -> None:
+    """Test 9: backfill must not degenerate into always-re-embed — that would
+    silently kill the incremental optimization."""
+    conn, vi, emb = stores
+    for i in range(3):
+        (tmp_path / f"doc{i}.txt").write_text(f"stable content {i}")
+    index_directory(conn, tmp_path, vector_index=vi, embedder=emb)
+    calls_after_first = emb.calls
+    assert calls_after_first > 0
+
+    stats = index_directory(conn, tmp_path, vector_index=vi, embedder=emb)
+
+    assert emb.calls == calls_after_first, "plain reindex of a vectored corpus re-embedded"
+    assert stats["skipped"] == 3 and stats["chunks"] == 0
+
+
+def test_markers_correct_post_backfill(stores, tmp_path: Path) -> None:
+    """Test 10: backfill makes the embed phase run, so the capability markers
+    are set — model and dimension recorded."""
+    conn, vi, emb = stores
+    (tmp_path / "doc.txt").write_text("needs vectors")
+    index_directory(conn, tmp_path)  # keyword-only
+
+    index_directory(conn, tmp_path, vector_index=vi, embedder=emb)  # plain backfill
+
+    caps = KeywordIndex(conn).get_capabilities()
+    assert caps.vectors_built is True
+    assert caps.embedding_model == "fake-model"
+    assert caps.embedding_dimension == 4

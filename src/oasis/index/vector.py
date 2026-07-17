@@ -101,5 +101,20 @@ class VectorIndex:
     def delete_by_doc_id(self, doc_id: int) -> None:
         self._table.delete(f"doc_id = {doc_id}")
 
+    def doc_ids_with_vectors(self) -> set[int]:
+        """Every distinct doc_id that has at least one vector chunk.
+
+        One bulk projection (doc_id column only — never the vectors), computed
+        once per pipeline run so the no-vector backfill check is a set lookup
+        per doc, not a query per doc. Note "has any vectors" deliberately says
+        nothing about *completeness*: a doc with a partial chunk set (crash
+        mid-embed) still counts as vectored.
+        """
+        total = self._table.count_rows()
+        if total == 0:
+            return set()
+        arr = self._table.search().select(["doc_id"]).limit(total).to_arrow()
+        return set(arr["doc_id"].to_pylist())
+
     def count(self) -> int:
         return self._table.count_rows()

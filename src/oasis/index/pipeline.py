@@ -21,6 +21,10 @@ logger = logging.getLogger(__name__)
 OnFile = Callable[[Path, str], None]
 # Called as (done, total) after each embedding batch; first call has done=0 to announce total.
 OnChunksProgress = Callable[[int, int], None]
+# Called once when the stale sweep starts (the API maps it to the "reconciling"
+# SSE phase). Deletes are fast, so the phase may be a blink — the durable
+# signal is the "removed" count in the returned stats.
+OnReconcile = Callable[[], None]
 
 EMBED_BATCH = 64
 
@@ -82,8 +86,9 @@ def index_directory(
     embedder: EmbeddingModel | None = None,
     on_chunks_progress: OnChunksProgress | None = None,
     cancel: threading.Event | None = None,
+    on_reconcile: OnReconcile | None = None,
 ) -> dict[str, int]:
-    """Walk *root*, extract and index every supported file, then embed.
+    """Walk *root*, extract and index every supported file, embed, reconcile.
 
     Returns a stats dict whose keys are always present.  ``permission_denied``
     is counted separately from ``failed`` so callers can tell "this file is
@@ -94,6 +99,28 @@ def index_directory(
     When *cancel* is set the run stops at the next file (or embedding batch)
     and returns partial stats.  Work already committed stays committed;
     indexing is incremental, so the next run resumes where this one stopped.
+
+    **Stale reconciliation** (``removed`` in the stats): after a complete,
+    clean walk, stored documents under *root* that the walk did not see —
+    removed from disk, moved, or newly excluded — are deleted from SQLite
+    (the ``_ad`` trigger cleans FTS) and from the vector store. The sweep
+    lives here, not in any caller, because this is the only place holding
+    both the authoritative seen-set and the completeness signal. It runs on
+    *any* complete walk, not only ``force`` — ``force`` governs embedding,
+    never walking, and an incremental reindex still walks the whole root.
+    It is skipped entirely (``removed: 0``) unless the walk was a trustworthy
+    census: not cancelled, zero walk errors, zero permission denials. The
+    permission gate is the landmine case: a ``chmod 000`` subdir yields a walk
+    that *completes* but never saw that subtree, and sweeping on it would
+    silently mass-delete every doc under a folder we merely couldn't read
+    this run. When the census is in doubt, delete nothing.
+
+    **No-vector backfill**: an unchanged file is skipped *only if* its doc
+    already has vector rows (when embedding is on). A pre-vector index is
+    therefore repaired by a plain reindex — no ``--force`` needed. Known
+    limitation, deliberate: "has any vectors" treats a partial chunk set
+    (crash mid-embed) as vectored; ``--force`` remains the full-rebuild
+    escape hatch.
     """
     # Stored paths are root-joined walker output, so a relative root means
     # relative stored keys — CWD-ambiguous, and two runs from different CWDs
@@ -111,6 +138,7 @@ def index_directory(
         "unsupported": 0,
         "permission_denied": 0,
         "chunks": 0,
+        "removed": 0,
     }
     idx = KeywordIndex(conn)
     # Record which root this index now covers, before the walk — so even a
@@ -122,17 +150,65 @@ def index_directory(
     do_embed = vector_index is not None and embedder is not None
     pending: list[_PendingDoc] = []
 
+    # Every path the walk yields, downstream outcome irrespective: a file that
+    # failed extraction this run still EXISTS, so it must never look "unseen"
+    # to the sweep. This set plus a clean census is the sweep's whole authority.
+    seen: set[str] = set()
+    walk_errors = 0
+
+    # Backfill support: which docs already have vectors, one bulk read before
+    # the walk (never a per-doc query in the loop). Only needed when embedding
+    # is on and the unchanged-skip path exists at all (force re-embeds anyway).
+    vectored: set[int] = (
+        vector_index.doc_ids_with_vectors() if do_embed and not force else set()
+    )
+
     def on_walk_error(exc: OSError) -> None:
         # os.walk swallows directory-level errors unless onerror is given, so
         # without this an unreadable tree yields nothing and is indistinguishable
         # from an empty one.  Full Disk Access denials land here, not in the
         # per-file handlers below — the files are never yielded at all.
+        nonlocal walk_errors
+        walk_errors += 1
         if isinstance(exc, PermissionError):
             logger.info("Permission denied: %s", exc.filename)
             stats["permission_denied"] += 1
         else:
             logger.warning("Cannot read %s: %s", exc.filename, exc.strerror)
             stats["failed"] += 1
+
+    def reconcile() -> None:
+        """Delete stored docs under root the walk didn't see — gated hard.
+
+        Runs only on a trustworthy complete census: not cancelled (a partial
+        walk's "not seen" is meaningless — it would delete everything past the
+        cancel point), zero walk errors, zero permission denials (a subtree we
+        couldn't read this run is invisible, not deleted). Coarse skip is the
+        deliberate first cut; per-subtree exclusion is a future refinement.
+        """
+        if cancel is not None and cancel.is_set():
+            return
+        if walk_errors or stats["permission_denied"]:
+            logger.info(
+                "Skipping stale sweep: census incomplete (%d walk error(s), %d permission denied)",
+                walk_errors,
+                stats["permission_denied"],
+            )
+            return
+        if on_reconcile:
+            on_reconcile()
+        for doc_id, stored_path in idx.docs_under(str(root)):
+            if stored_path in seen:
+                continue
+            # Converge both stores per doc — a doc gone from one arm but live
+            # in the other would return stale hits. Vectors first, then the
+            # documents row (whose _ad trigger cleans FTS).
+            if vector_index is not None:
+                vector_index.delete_by_doc_id(doc_id)
+            idx.delete(Path(stored_path))
+            stats["removed"] += 1
+        if stats["removed"]:
+            logger.info("Removed %d stale document(s) under %s", stats["removed"], root)
 
     # -----------------------------------------------------------------------
     # Phase 1: walk → extract → keyword index
@@ -141,6 +217,7 @@ def index_directory(
         if cancel is not None and cancel.is_set():
             logger.info("Indexing cancelled after %d file(s)", stats["indexed"])
             return stats
+        seen.add(str(path))
 
         extractor = get_extractor(path)
         if extractor is None:
@@ -167,10 +244,16 @@ def index_directory(
             continue
 
         if not force and idx.is_unchanged(path, size=st.st_size, mtime=st.st_mtime):
-            stats["skipped"] += 1
-            if on_file:
-                on_file(path, "skipped")
-            continue
+            # Backfill check: unchanged is only skippable when the doc's
+            # vectors exist (or embedding is off). An unchanged-but-unvectored
+            # doc falls through to full re-extract + embed, so a plain reindex
+            # repairs a pre-vector index without --force.
+            doc_id = idx.get_doc_id(path) if do_embed else None
+            if not do_embed or doc_id in vectored:
+                stats["skipped"] += 1
+                if on_file:
+                    on_file(path, "skipped")
+                continue
 
         try:
             doc = extractor.extract(path)
@@ -234,7 +317,10 @@ def index_directory(
     # -----------------------------------------------------------------------
     if not (do_embed and pending):
         # The embed phase didn't run — either no embedder, or nothing new to
-        # embed. Record the schema version but don't claim vectors: if a prior
+        # embed. This is the main sweep path: a reindex where only deletions
+        # happened has nothing to embed but still must reconcile.
+        reconcile()
+        # Record the schema version but don't claim vectors: if a prior
         # run built them, its marker is still there and stays true.
         _write_capability_markers(idx, None)
         return stats
@@ -283,5 +369,8 @@ def index_directory(
         if on_chunks_progress:
             on_chunks_progress(done, total)
 
+    # Sweep after embed so a run cancelled mid-embed never deletes (matching
+    # the job-level "sweep only on done" rule); reconcile() re-checks cancel.
+    reconcile()
     _write_capability_markers(idx, embedder)
     return stats

@@ -55,7 +55,15 @@ _TERMINAL_STATUSES = frozenset({"done", "cancelled", "error"})
 # Pre-populated so job.stats never grows a key while the SSE thread copies it
 # (dict() over a dict being resized on another thread raises). The pipeline
 # returns exactly these keys; here they just start at zero.
-_ZERO_STATS = ("indexed", "skipped", "failed", "unsupported", "permission_denied", "chunks")
+_ZERO_STATS = (
+    "indexed",
+    "skipped",
+    "failed",
+    "unsupported",
+    "permission_denied",
+    "chunks",
+    "removed",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +99,13 @@ def _run_job(state: AppState, job: IndexJob) -> None:
         job.stats["chunks"] = done
         broker.publish_progress(progress_event(job))
 
+    def on_reconcile() -> None:
+        # The stale sweep is starting. Often a blink (deletes are fast) and the
+        # progress event is throttled/droppable — the durable signal is the
+        # `removed` count in the terminal stats, which is never dropped.
+        job.phase = "reconciling"
+        broker.publish_progress(progress_event(job))
+
     try:
         conn = get_conn(state.db_path)  # thread-local: fresh handle for this worker
         final_stats = index_directory(
@@ -102,14 +117,13 @@ def _run_job(state: AppState, job: IndexJob) -> None:
             embedder=state.embedder,
             on_chunks_progress=on_chunks_progress,
             cancel=job.cancel,
+            on_reconcile=on_reconcile,
         )
         # index_directory returns partial stats whether it finished or was
         # cancelled — it doesn't say which. Decide it HERE, from the cancel flag.
-        #
-        # NEXT COMMIT: the stale-reconciliation / no-vector-backfill sweep must
-        # gate on `status == "done"` and never run on `cancelled` (or a partial
-        # walk): "not seen in the walk" is meaningless for an incomplete walk,
-        # and sweeping on it would delete everything past the cancel point.
+        # (The stale sweep lives inside the pipeline and gates itself on the
+        # same cancel event plus census cleanliness — a cancelled or dirty walk
+        # reports removed: 0 and deletes nothing.)
         job.stats.update(final_stats)  # authoritative final counts
         job.status = "cancelled" if job.cancel.is_set() else "done"
     except Exception as exc:

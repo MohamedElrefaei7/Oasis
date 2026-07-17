@@ -211,6 +211,8 @@ def index(
         parts.append(f"[red]{stats['failed']} failed[/red]")
     if stats["permission_denied"]:
         parts.append(f"[yellow]{stats['permission_denied']} permission denied[/yellow]")
+    if stats["removed"]:
+        parts.append(f"[dim]{stats['removed']} removed[/dim]")
 
     _console.print("Done — " + "  ".join(parts))
     if stats["permission_denied"] and not stats["indexed"]:

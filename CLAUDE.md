@@ -244,11 +244,18 @@ This follows from `hybrid_search`'s arms failing independently (fixed in `query/
 - **`llm_parsed`** — did the LLM actually run (mirrors the CLI's `·  parsed` footer badge). Distinct from `parsed` being non-null, same as in `cli/app.py`.
 - **`latency_ms`** — server-side, measured around retrieval only, warm. This is the honest number for the README benchmarks table: timing the CLI measures model loading, which a running server never pays. Add it now — retrofitting it means re-running the whole eval to regenerate the numbers.
 
-#### `POST /api/index` — **implemented (`api/index.py`, `api/jobs.py`, 2026-07-16)**
+#### `POST /api/index` — **implemented (`api/index.py`, `api/jobs.py`, 2026-07-16; reconciliation + backfill 2026-07-17)**
 ```jsonc
 { "root": "/Users/you/Documents", "force": false }
 ```
-> **Body field is `root`, not `path`.** `/api/index` takes a *directory* to walk; `/api/open` takes a *file*. The distinct name keeps the two from being confused, and `root` matches the pipeline's own parameter. `force` is on the wire now but this commit only passes it through to `index_directory(force=…)` (re-embed everything); its stale-sweep semantics land next commit — the shape is fixed so the client never changes.
+> **Body field is `root`, not `path`.** `/api/index` takes a *directory* to walk; `/api/open` takes a *file*. The distinct name keeps the two from being confused, and `root` matches the pipeline's own parameter. **`force` governs *embedding*, not *walking*** — a plain reindex still walks the whole root (it only skips re-embedding unchanged, already-vectored files), so reconciliation below runs on any complete walk, `--force` or not.
+
+**Stale reconciliation (the sweep).** On a complete, clean walk of `root`, stored documents *under that root* that the walk did not see — removed from disk, moved, or newly excluded — are deleted from all three stores: SQLite row, FTS (via the `_ad` after-delete trigger), and vectors (`delete_by_doc_id`), converged per doc so no arm serves stale hits. The sweep lives **inside `index_directory`** (the only place holding both the authoritative seen-set and the completeness signal); the job/API only reads the `removed` count off the returned stats.
+
+- **The census gate** — the sweep runs only when the walk was a trustworthy complete census, and skips entirely (`removed: 0`) otherwise: **not cancelled** (a partial walk's "not seen" is meaningless), **zero walk errors** (`os.walk` `on_error` never fired), and **zero `permission_denied`** — the landmine: a `chmod 000` subdir yields a walk that *completes* but never saw that subtree, and sweeping would silently mass-delete everything under a folder that merely couldn't be read this run. When the census is in doubt, delete nothing. (Per-subtree exclusion is a deferred refinement; the coarse skip is deliberate.)
+- **Under-root scoping uses a separator boundary**, filtered in Python (`path.startswith(root + os.sep)`), never SQL `LIKE` — paths contain `_`, which `LIKE` treats as a single-char wildcard, so a `LIKE` prefix over-matches silently, and a bare prefix would put `/tmp/ab` "under" `/tmp/a`.
+
+**No-vector backfill.** An unchanged file is skipped **iff** its doc already has vector rows (bulk `VectorIndex.doc_ids_with_vectors()` computed once before the walk, never per-doc queries). Unchanged-but-unvectored docs are re-extracted and embedded, so a plain `oasis index` repairs a pre-vector index's `semantic_ready` without `--force`. Known limitation, deliberate: "has any vectors" treats a partial chunk set (crash mid-embed) as vectored — `--force` remains the full-rebuild escape hatch. Backfill makes the embed phase run, so `_write_capability_markers` sets the markers; the only-set-never-clear rule is undisturbed.
 
 **Returns `202` immediately with a job handle — it does not block.** The CLI's blocking behavior is wrong here, and the "indexing is incremental so re-runs are fast" rationale only covers re-runs. The case that decides whether the app feels good is first-time indexing of `~/Documents` on first launch: minutes, not seconds. Blocking means (1) `URLSession`'s default 60s `timeoutIntervalForRequest` kills it outright, (2) no progress — a ten-minute spinner is indistinguishable from a hang, and (3) no cancel.
 
@@ -290,13 +297,18 @@ event: progress
 data: {"type": "progress", "job_id": "b1f4...", "phase": "embed",
        "stats": {"indexed": 812, ..., "chunks": 1280}, "done": 1280, "total": 4310}
 
+event: progress
+data: {"type": "progress", "job_id": "b1f4...", "phase": "reconciling",
+       "stats": {"indexed": 812, ..., "chunks": 4310, "removed": 0}, "done": 4310, "total": 4310}
+
 event: done
 data: {"type": "done", "job_id": "b1f4...", "stats": {"indexed": 812, "skipped": 220,
-       "unsupported": 8, "failed": 2, "permission_denied": 0, "chunks": 4310}}
+       "unsupported": 8, "failed": 2, "permission_denied": 0, "chunks": 4310, "removed": 3}}
 
 : ping
 ```
 - **`total` is `null` during `scan`.** The walk is a lazy generator, so the file count isn't known until it finishes — the same reason `cli/app.py` gives the scan task `total=None` and only the embed task a real total. Don't fake it; the client renders indeterminate for scan, determinate for embed.
+- **`phase: "reconciling"`** fires when the stale sweep starts. Deletes are fast, so the phase is often a blink and its progress event is throttle-droppable like any other; the durable signal is **`removed`** in the terminal `done` stats (always present, `0` when the sweep was skipped or found nothing), which the manage-index screen can surface as "N files removed."
 - **Terminal events**: `done` and `cancelled` (each `{type, job_id, stats}`), or `error` (`{type, job_id, message}`). The stream closes after any of them. A snapshot with no job ever run reports `status: "idle"` and closes; a terminal-status snapshot flushes any event queued in the register→snapshot gap, then closes.
 - **Snapshot ordering**: the handler registers its queue *before* reading the snapshot, so a terminal event firing in that gap lands in the queue instead of vanishing.
 - **Fan-out**: each subscriber gets its own `asyncio.Queue` off a subscriber set, so N connections don't steal each other's events.

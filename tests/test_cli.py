@@ -32,6 +32,11 @@ def _mock_heavy_deps():
     merge = MagicMock()
     merge.when_matched_update_all.return_value = merge
     merge.when_not_matched_insert_all.return_value = merge
+    # Track upserted doc ids so doc_ids_with_vectors (patched below) reports
+    # what was actually written — the pipeline's unchanged-and-vectored skip
+    # then behaves as it does against real LanceDB.
+    upserted: set[int] = set()
+    merge.execute.side_effect = lambda rows: upserted.update(r["doc_id"] for r in rows)
     mock_table.merge_insert.return_value = merge
     mock_table.count_rows.return_value = 0
     mock_table.search.return_value = mock_search
@@ -44,6 +49,8 @@ def _mock_heavy_deps():
     reranker_mod._MODEL_CACHE.clear()
     with patch("oasis.index.embeddings.SentenceTransformer", return_value=fake_model), \
          patch("oasis.index.vector.lancedb.connect", return_value=mock_db), \
+         patch("oasis.index.vector.VectorIndex.doc_ids_with_vectors",
+               lambda self: set(upserted)), \
          patch("oasis.query.reranker.CrossEncoder", return_value=fake_ce), \
          patch("oasis.cli.app.ensure_ollama", return_value=None):
         yield

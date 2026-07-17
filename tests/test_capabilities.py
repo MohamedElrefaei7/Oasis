@@ -54,6 +54,11 @@ class FakeVectorIndex:
     def count(self) -> int:
         return len(self.rows)
 
+    def doc_ids_with_vectors(self) -> set[int]:
+        # Faithful: report exactly what was upserted, so the pipeline's
+        # unchanged-and-vectored skip behaves as it does against real LanceDB.
+        return {r.doc_id for r in self.rows}
+
 
 class FakeReranker:
     def rerank(self, query, results, *, top_n=None):
@@ -185,10 +190,13 @@ def test_incremental_rerun_does_not_downgrade_vectors_built(tmp_path, corpus):
     clear the markers of an index whose vectors are perfectly good."""
     conn = open_db(tmp_path / "index.db")
     embedder = FakeEmbedder()
-    index_directory(conn, corpus, vector_index=FakeVectorIndex(), embedder=embedder)
+    # One vector store across both runs — vectors persist between reindexes.
+    # (A fresh empty store would rightly trigger the no-vector backfill.)
+    vectors = FakeVectorIndex()
+    index_directory(conn, corpus, vector_index=vectors, embedder=embedder)
     assert KeywordIndex(conn).get_capabilities().vectors_built is True
 
-    stats = index_directory(conn, corpus, vector_index=FakeVectorIndex(), embedder=embedder)
+    stats = index_directory(conn, corpus, vector_index=vectors, embedder=embedder)
     assert stats["skipped"] == 2 and stats["chunks"] == 0  # nothing re-embedded
 
     caps = KeywordIndex(conn).get_capabilities()
