@@ -295,7 +295,9 @@ The jump is entirely from splitting `hybrid_search`'s try blocks (below). 10 of 
 
 ---
 
-## Tests — 921, all passing
+## Tests — 922, all passing
+
+New 2026-07-17 (seen-set point-of-entry check): `test_pipeline.py` +1 — verified the stale sweep's seen-set is keyed on the **walk yield** (`pipeline.py`, `seen.add(str(path))` — inside the walk loop, before `get_extractor` dispatch and long before `extractor.extract()` runs), not on extraction success. This matters because the census gate (cancel / walk-errors / permission_denied) does NOT cover this case: extractors contractually swallow their own I/O errors and return `None` without touching any of those counters, so a readable-but-momentarily-unextractable file would pass the gate and, if keyed on extraction success, be wrongly swept. Confirmed already correct — no code change needed. Guard test: full-index A/B/C, bump C's mtime (so it's no longer "unchanged" and extraction is attempted), monkeypatch C's extractor to return `None` this run, reindex → `removed: 0`, C's row/vectors/FTS all survive untouched, distinct from the permission-denied-subtree and cancelled-walk sweep-skip tests.
 
 New 2026-07-17 (commit 2, reconciliation + backfill): `test_pipeline.py` +10 — the seven adversarial sweep tests (deleted-file swept from all three stores; sibling-prefix isolation; permission-denied subtree survives; cancelled reindex deletes nothing; rename + new-exclude reconciled; cross-root isolation) over real SQLite + real LanceDB with a counting fake embedder, and the three backfill tests (plain reindex repairs a keyword-only index; fully-vectored unchanged corpus re-embeds zero — spied; markers recorded post-backfill). `test_api_index.py` +1 — SSE `reconciling` phase (throttle disabled) + `removed: 1` in `done`, swept doc absent from both arms.
 

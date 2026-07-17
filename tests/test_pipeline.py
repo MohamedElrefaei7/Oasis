@@ -888,3 +888,50 @@ def test_markers_correct_post_backfill(stores, tmp_path: Path) -> None:
     assert caps.vectors_built is True
     assert caps.embedding_model == "fake-model"
     assert caps.embedding_dimension == 4
+
+
+def test_extraction_failure_does_not_sweep_the_present_file(stores, tmp_path: Path) -> None:
+    """A file still present on disk whose extraction returns None THIS RUN must
+    not look "unseen" to the stale sweep — the census gate (cancel/walk-errors/
+    permission_denied) doesn't protect this case, because extractors swallow
+    their own I/O errors and return None without ever touching those counters.
+    The seen-set is keyed on the walk yield (before extraction is attempted),
+    specifically so an extraction failure can't masquerade as deletion.
+
+    Distinct from test_sweep_skipped_on_permission_denied_subtree (a directory
+    denial) and test_sweep_skipped_on_cancel (a partial walk): this is the
+    present-but-extraction-failed case, and the sweep must still run (it's a
+    clean, complete census) but must not touch the failing file's row.
+    """
+    import os
+
+    conn, vi, emb = stores
+    (tmp_path / "a.txt").write_text("a content")
+    (tmp_path / "b.txt").write_text("b content")
+    c_path = tmp_path / "c.txt"
+    c_path.write_text("c content searchable via cqctoken")
+    index_directory(conn, tmp_path, vector_index=vi, embedder=emb)
+    idx = KeywordIndex(conn)
+    c_id = idx.get_doc_id(c_path)
+    assert c_id is not None and c_id in vi.doc_ids_with_vectors()
+
+    # Bump c.txt's mtime so it's no longer "unchanged" and this run actually
+    # attempts extraction for it (an unchanged file never reaches extract()).
+    new_mtime = c_path.stat().st_mtime + 100
+    os.utime(c_path, (new_mtime, new_mtime))
+
+    original_extract = TextExtractor.extract
+
+    def flaky_extract(self, path: Path):
+        if path.name == "c.txt":
+            return None  # e.g. a transient I/O error the extractor swallowed
+        return original_extract(self, path)
+
+    with patch.object(TextExtractor, "extract", flaky_extract):
+        stats = index_directory(conn, tmp_path, vector_index=vi, embedder=emb)
+
+    assert stats["failed"] == 1  # the extraction failure is counted...
+    assert stats["removed"] == 0  # ...but NOT as a sweep deletion
+    assert idx.get_doc_id(c_path) == c_id  # row survives, same doc_id
+    assert c_id in vi.doc_ids_with_vectors()  # prior vectors survive
+    assert idx.search("cqctoken") != []  # still searchable via keyword
