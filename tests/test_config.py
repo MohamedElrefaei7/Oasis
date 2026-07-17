@@ -25,7 +25,7 @@ def _cfg_no_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> OasisConfig
 
 
 def test_config_path_location() -> None:
-    assert CONFIG_PATH == Path.home() / ".config" / "oasis" / "config.toml"
+    assert Path.home() / ".config" / "oasis" / "config.toml" == CONFIG_PATH
 
 
 # ---------------------------------------------------------------------------

@@ -2,8 +2,7 @@
 
 import pytest
 
-from oasis.index.chunker import CHUNK_SIZE, OVERLAP, Chunk, chunk_document, _ENC
-
+from oasis.index.chunker import _ENC, CHUNK_SIZE, OVERLAP, Chunk, chunk_document
 
 # ---------------------------------------------------------------------------
 # Return type / shape
@@ -231,7 +230,10 @@ def test_default_parameters_used_when_not_specified() -> None:
     chunks_default = chunk_document(text)
     chunks_explicit = chunk_document(text, chunk_size=500, overlap=50)
     assert len(chunks_default) == len(chunks_explicit)
-    assert all(a.token_count == b.token_count for a, b in zip(chunks_default, chunks_explicit))
+    assert all(
+        a.token_count == b.token_count
+        for a, b in zip(chunks_default, chunks_explicit, strict=False)
+    )
 
 
 # ---------------------------------------------------------------------------

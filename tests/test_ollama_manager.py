@@ -3,12 +3,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-
-import oasis.llm.manager as mgr
 from oasis.llm.manager import _model_available, _server_running, _start_server, ensure_ollama
 from oasis.llm.ollama import DEFAULT_MODEL, OllamaProvider
-
 
 # ---------------------------------------------------------------------------
 # _server_running

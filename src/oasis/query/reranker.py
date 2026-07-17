@@ -63,7 +63,7 @@ class CrossEncoderReranker:
         scores = np.atleast_1d(np.asarray(raw, dtype=np.float32))
 
         reranked = sorted(
-            (replace(r, score=float(s)) for r, s in zip(results, scores)),
+            (replace(r, score=float(s)) for r, s in zip(results, scores, strict=False)),
             key=lambda r: r.score,
             reverse=True,
         )

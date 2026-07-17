@@ -60,3 +60,13 @@ target-version = "py314"
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "UP", "B", "SIM"]
 ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# Typer's documented pattern is function calls in argument defaults
+# (typer.Option(...)/typer.Argument(...)); B008 flags exactly that, so it's a
+# false positive wherever the CLI is defined.
+"src/oasis/cli/app.py" = ["B008"]
+# Test-local aliases for patched classes are conventionally capitalized
+# (MockST, MockCE) to read as the class they stand in for; N806 in tests is
+# noise, not a naming problem worth renaming 12 call sites for.
+"tests/**" = ["N806"]

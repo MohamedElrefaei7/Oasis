@@ -2,14 +2,10 @@
 
 from pathlib import Path
 
-import pytest
-
 from oasis.extractors.docx import DocxExtractor
 from oasis.extractors.pdf import PdfExtractor
 from oasis.extractors.pptx import PptxExtractor
 from oasis.extractors.text import TextExtractor
-from oasis.models import ExtractedDocument
-
 
 # ---------------------------------------------------------------------------
 # TextExtractor
@@ -98,7 +94,6 @@ class TestPdfExtractorEdges:
 
     def test_multipage_pdf_page_count_correct(self, tmp_path: Path) -> None:
         from pypdf import PdfWriter
-        from pypdf.generic import NameObject
         f = tmp_path / "multi.pdf"
         writer = PdfWriter()
         for _ in range(3):

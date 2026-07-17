@@ -1,6 +1,6 @@
 """Tests for oasis.index.embeddings."""
 
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -9,11 +9,9 @@ import oasis.index.embeddings as emb_mod
 from oasis.index.embeddings import (
     BATCH_SIZE,
     DEFAULT_MODEL,
-    EmbeddingModel,
     SentenceTransformerEmbedder,
     _load_model,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

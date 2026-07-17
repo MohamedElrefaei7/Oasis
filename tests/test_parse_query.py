@@ -15,7 +15,7 @@ from unittest.mock import MagicMock
 import pytest
 from pydantic import BaseModel
 
-from oasis.query.parser import DateRange, ParsedQuery, _SYSTEM_PROMPT, parse_query
+from oasis.query.parser import _SYSTEM_PROMPT, DateRange, ParsedQuery, parse_query
 
 # ---------------------------------------------------------------------------
 # Helpers

@@ -8,7 +8,7 @@ import pytest
 from oasis.extractors.text import TextExtractor
 from oasis.index.db import open_db
 from oasis.index.keyword import KeywordIndex
-from oasis.index.pipeline import EMBED_BATCH, index_directory
+from oasis.index.pipeline import index_directory
 from oasis.index.vector import VectorIndex
 
 

@@ -79,10 +79,10 @@ Output: {"semantic_query": "x", "file_types": [], "date_range": null, "folders":
 
 def parse_query(
     text: str,
-    llm: "LLMProvider",
+    llm: LLMProvider,
     *,
     today: date | None = None,
-) -> "ParsedQuery":
+) -> ParsedQuery:
     """Parse a natural-language search string into a structured ParsedQuery.
 
     Args:

@@ -8,8 +8,7 @@ from typer.testing import CliRunner
 
 import oasis.cli.app as app_module
 import oasis.query.reranker as reranker_mod
-from oasis.cli.app import app, _LAST_RESULTS_PATH
-from oasis.index.db import open_db
+from oasis.cli.app import app
 
 runner = CliRunner()
 
@@ -276,7 +275,7 @@ def test_reset_without_yes_prompts(tmp_path: Path) -> None:
     (tmp_path / "doc.txt").write_text("hello")
     runner.invoke(app, ["index", str(tmp_path), "--db", str(db)])
     # Decline the confirmation — db should remain
-    result = runner.invoke(app, ["reset", "--db", str(db)], input="n\n")
+    runner.invoke(app, ["reset", "--db", str(db)], input="n\n")
     assert db.exists()
 
 

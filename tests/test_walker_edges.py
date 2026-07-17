@@ -1,6 +1,5 @@
 """Edge-case tests for the walker beyond the baseline test_walker.py coverage."""
 
-import os
 from pathlib import Path
 
 import pytest

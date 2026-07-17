@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from oasis.index.db import open_db
-from oasis.index.keyword import MATCH_END, MATCH_START, KeywordIndex, _file_hash
+from oasis.index.keyword import KeywordIndex, _file_hash
 from oasis.models import DocumentMetadata, ExtractedDocument
 
 

@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from pydantic import ValidationError
 
 from oasis.query.parser import DateRange, ParsedQuery
-
 
 # ---------------------------------------------------------------------------
 # DateRange
@@ -22,29 +21,29 @@ def test_date_range_defaults_are_none() -> None:
 
 
 def test_date_range_after_only() -> None:
-    dt = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    dt = datetime(2024, 1, 1, tzinfo=UTC)
     dr = DateRange(after=dt)
     assert dr.after == dt
     assert dr.before is None
 
 
 def test_date_range_before_only() -> None:
-    dt = datetime(2024, 6, 1, tzinfo=timezone.utc)
+    dt = datetime(2024, 6, 1, tzinfo=UTC)
     dr = DateRange(before=dt)
     assert dr.before == dt
     assert dr.after is None
 
 
 def test_date_range_valid_after_before() -> None:
-    after = datetime(2024, 1, 1, tzinfo=timezone.utc)
-    before = datetime(2024, 12, 31, tzinfo=timezone.utc)
+    after = datetime(2024, 1, 1, tzinfo=UTC)
+    before = datetime(2024, 12, 31, tzinfo=UTC)
     dr = DateRange(after=after, before=before)
     assert dr.after == after
     assert dr.before == before
 
 
 def test_date_range_before_equal_to_after_raises() -> None:
-    dt = datetime(2024, 6, 1, tzinfo=timezone.utc)
+    dt = datetime(2024, 6, 1, tzinfo=UTC)
     with pytest.raises(ValidationError):
         DateRange(after=dt, before=dt)
 
@@ -52,8 +51,8 @@ def test_date_range_before_equal_to_after_raises() -> None:
 def test_date_range_before_earlier_than_after_raises() -> None:
     with pytest.raises(ValidationError):
         DateRange(
-            after=datetime(2024, 12, 31, tzinfo=timezone.utc),
-            before=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            after=datetime(2024, 12, 31, tzinfo=UTC),
+            before=datetime(2024, 1, 1, tzinfo=UTC),
         )
 
 

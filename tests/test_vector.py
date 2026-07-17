@@ -3,20 +3,18 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
 
-import oasis.index.vector as vec_mod
 from oasis.index.vector import (
+    _TABLE_NAME,
     ChunkRow,
     VectorIndex,
     VectorResult,
-    _TABLE_NAME,
     _build_schema,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers

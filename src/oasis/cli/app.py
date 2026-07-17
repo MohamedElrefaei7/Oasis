@@ -1,8 +1,8 @@
-import enum
 import json
 import sqlite3
 import subprocess
 from datetime import datetime
+from enum import StrEnum
 from pathlib import Path
 
 import typer
@@ -32,7 +32,7 @@ from oasis.query.retriever import DEFAULT_TOP_N, hybrid_search
 from oasis.query.snippets import text_snippet
 
 
-class SearchMode(str, enum.Enum):
+class SearchMode(StrEnum):
     keyword = "keyword"
     semantic = "semantic"
     hybrid = "hybrid"
@@ -284,7 +284,9 @@ def cmd_search(
             else:
                 parsed = ParsedQuery(semantic_query=query)
 
-    from oasis.query.retriever import _build_vec_where  # local import avoids circular at module level
+    from oasis.query.retriever import (
+        _build_vec_where,  # local import avoids circular at module level
+    )
 
     # ------------------------------------------------------------------ keyword
     if mode == SearchMode.keyword:
@@ -297,7 +299,7 @@ def cmd_search(
         except sqlite3.OperationalError as exc:
             _err.print(f"[red]Query error:[/red] {exc}")
             _err.print('Tip: wrap phrases in double quotes — e.g. oasis search \\"machine learning\\"')
-            raise typer.Exit(1)
+            raise typer.Exit(1) from None
         finally:
             conn.close()
 
@@ -350,7 +352,7 @@ def cmd_search(
     except sqlite3.OperationalError as exc:
         _err.print(f"[red]Query error:[/red] {exc}")
         _err.print('Tip: wrap phrases in double quotes — e.g. oasis search \\"machine learning\\"')
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
     finally:
         conn.close()
 
@@ -470,7 +472,7 @@ def cmd_open(
         paths = json.loads(_LAST_RESULTS_PATH.read_text())
     except (OSError, json.JSONDecodeError):
         _err.print("[red]Could not read last search results — try searching again.[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
 
     if not 1 <= n <= len(paths):
         _err.print(f"[red]No result #{n}.[/red] Last search returned {len(paths)} result(s).")

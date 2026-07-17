@@ -18,7 +18,6 @@ from oasis.query.reranker import (
 )
 from oasis.query.retriever import HybridResult
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
