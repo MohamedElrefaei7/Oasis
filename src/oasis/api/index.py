@@ -41,7 +41,7 @@ from oasis.api.jobs import (
     snapshot_event,
     terminal_event,
 )
-from oasis.api.schemas import IndexRequest, JobResponse
+from oasis.api.schemas import CancelRequest, IndexRequest, JobResponse
 from oasis.api.state import AppState, get_conn
 from oasis.index.pipeline import index_directory
 
@@ -241,9 +241,15 @@ async def index_events(request: Request) -> StreamingResponse:
 
 
 @router.post("/index/cancel", status_code=202, response_model=JobResponse)
-def cancel_index(request: Request) -> JobResponse:
-    """Cooperatively cancel the running job. 202 (requested, not synchronously
-    effected — the job ends a beat later on its own thread) or 409 if none runs.
+def cancel_index(request: Request, body: CancelRequest) -> JobResponse:
+    """Cooperatively cancel a specific running job. 202 (requested, not
+    synchronously effected — the job ends a beat later on its own thread), or
+    409 when ``body.job_id`` is not the currently-running job: a stale id, an
+    id naming a finished job, or no job running at all.
+
+    Binding cancel to a job_id (not "whatever is running") matters once
+    auto-reindex exists: a cancel aimed at job N arriving after N finished and
+    N+1 auto-started must NOT kill N+1 — it 409s instead.
 
     The pipeline checks ``job.cancel`` per file and between embed batches and
     returns partial stats; ``_run_job`` then settles the status to ``cancelled``
@@ -256,6 +262,16 @@ def cancel_index(request: Request) -> JobResponse:
         raise StarletteHTTPException(
             status_code=409,
             detail={"code": "conflict", "message": "No index job is running."},
+        )
+    if body.job_id != job.id:
+        # Never touch the running job's cancel event on a mismatch — that
+        # would be exactly the kill-the-wrong-job race the body exists to close.
+        raise StarletteHTTPException(
+            status_code=409,
+            detail={
+                "code": "conflict",
+                "message": f"job_id {body.job_id!r} is not the running job ({job.id}).",
+            },
         )
     job.cancel.set()
     return JobResponse(job_id=job.id, status=job.status)

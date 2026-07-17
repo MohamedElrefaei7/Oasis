@@ -576,3 +576,71 @@ def test_cancel_committed_work_persists(conn: sqlite3.Connection, tmp_path: Path
     assert stats["indexed"] == 9
     assert stats["skipped"] == 1
     assert KeywordIndex(conn).count() == 10
+
+
+# ---------------------------------------------------------------------------
+# Resume idempotency — instrumentation for the stale-sweep precondition
+# ---------------------------------------------------------------------------
+
+
+def test_cancel_resume_is_idempotent_doc_count_matches_walk(
+    conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    """Cancel a reindex partway, resume to completion, and assert the invariant
+    the stale-sweep (next commit) depends on:
+
+        COUNT(*) == COUNT(DISTINCT path) == indexable files walked under root
+
+    ``path`` is UNIQUE, so extra distinct-path rows are structurally impossible;
+    a violation here would mean different *path forms* for one file (the
+    relative-path collision class) reached storage. The sweep's set-difference
+    assumes stored docs are 1:1 with indexable files — this is the test that
+    goes red if a non-idempotent resume ever breaks that assumption.
+
+    Instrumented (prints all three counts + each run's stats) so a live number
+    like "resumed to 403 docs over a 400-file root" can be reconciled against
+    ground truth instead of guessed at.
+    """
+    import threading
+
+    from oasis.extractors.registry import get_extractor
+    from oasis.index.walker import walk
+
+    for i in range(40):
+        (tmp_path / f"f{i:02d}.txt").write_text(f"content number {i} with words")
+    (tmp_path / "sub").mkdir()
+    for i in range(8):
+        (tmp_path / "sub" / f"s{i}.txt").write_text(f"nested content {i}")
+    for i in range(3):
+        (tmp_path / f"blob{i}.xyz").write_text("unsupported, walked but never a doc row")
+
+    # Ground truth: what a complete walk actually yields as indexable.
+    walked_indexable = sum(1 for p in walk(tmp_path) if get_extractor(p) is not None)
+
+    stats_full = index_directory(conn, tmp_path)
+
+    cancel = threading.Event()
+    seen = {"indexed": 0}
+
+    def cancel_partway(path: Path, status: str) -> None:
+        if status == "indexed":
+            seen["indexed"] += 1
+            if seen["indexed"] >= 10:
+                cancel.set()
+
+    # force=True mirrors the live run: a reindex re-visits every stored file.
+    stats_cancelled = index_directory(conn, tmp_path, force=True, cancel=cancel, on_file=cancel_partway)
+    stats_resumed = index_directory(conn, tmp_path, force=True)
+
+    count_all = conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+    count_distinct = conn.execute("SELECT COUNT(DISTINCT path) FROM documents").fetchone()[0]
+
+    print(f"\nwalked_indexable = {walked_indexable}")
+    print(f"COUNT(*)         = {count_all}")
+    print(f"COUNT(DISTINCT path) = {count_distinct}")
+    print(f"run 1 (full):      {stats_full}")
+    print(f"run 2 (cancelled): {stats_cancelled}")
+    print(f"run 3 (resumed):   {stats_resumed}")
+
+    assert stats_cancelled["indexed"] < walked_indexable  # the cancel really bit
+    assert count_all == count_distinct == walked_indexable

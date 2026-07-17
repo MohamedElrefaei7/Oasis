@@ -39,6 +39,18 @@ ZERO_STATS = {
 }
 
 
+@pytest.fixture(autouse=True, scope="module")
+def _hermetic_no_torch():
+    """These tests stand up real uvicorn servers but with faked models — the
+    whole point is that the default suite never pays for PyTorch. Goes red if
+    anything on this file's import-or-run path drags the real weights back in
+    (e.g. a module-level ``from sentence_transformers import …`` regression)."""
+    yield
+    import sys
+
+    assert "torch" not in sys.modules, "test_api_index must never import PyTorch"
+
+
 class FakeEmbedder:
     dimension = DIM
     model_name = "fake-model"
@@ -85,12 +97,11 @@ def client(monkeypatch, tmp_path):
     base_url = f"http://127.0.0.1:{port}"
     # No default auth header — the auth tests send requests without a token.
     c = httpx.Client(base_url=base_url, timeout=30.0)
-    # Poll health until the (faked, fast) models finish loading.
+    # Poll health until the (faked, fast) models finish loading. Sub-second in
+    # practice — the fakes keep PyTorch out entirely (guard below), so the only
+    # cold-start cost is LanceDB. Same 10s budget as test_api_skeleton.
     last = "no response"
-    # Generous: normal readiness is well under a second (models are faked), but
-    # a full-file run spins 16 servers back-to-back and LanceDB's native runtime
-    # under that churn can occasionally push a cold start past a tight budget.
-    deadline = time.monotonic() + 45
+    deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
         try:
             r = c.get("/api/health")
@@ -565,7 +576,7 @@ def test_cancel_mid_index_yields_cancelled_not_done(client, tmp_path, monkeypatc
 
     monkeypatch.setattr("oasis.api.index.index_directory", fake)
 
-    client.post("/api/index", json={"root": str(d)}, headers=AUTH)
+    job_id = client.post("/api/index", json={"root": str(d)}, headers=AUTH).json()["job_id"]
     assert committed.wait(5)
 
     # Mid-index: the doc committed before cancelling is already searchable.
@@ -575,7 +586,8 @@ def test_cancel_mid_index_yields_cancelled_not_done(client, tmp_path, monkeypatc
     with client.stream("GET", "/api/index/events", headers=AUTH) as s:
         lines = s.iter_lines()
         assert _next_event(lines)["type"] == "snapshot"
-        assert client.post("/api/index/cancel", headers=AUTH).status_code == 202
+        r = client.post("/api/index/cancel", json={"job_id": job_id}, headers=AUTH)
+        assert r.status_code == 202
         events = _read_until(lines, TERMINAL)
 
     types = [e["type"] for e in events]
@@ -587,15 +599,49 @@ def test_cancel_mid_index_yields_cancelled_not_done(client, tmp_path, monkeypatc
 
 
 def test_cancel_with_no_running_job_is_409(client):
-    assert client.post("/api/index/cancel", headers=AUTH).status_code == 409
+    r = client.post("/api/index/cancel", json={"job_id": "anything"}, headers=AUTH)
+    assert r.status_code == 409
+
+
+def test_cancel_wrong_job_id_is_409_and_does_not_touch_running_job(client, corpus, monkeypatch):
+    """The auto-reindex-race guard: a cancel naming a job that is NOT the one
+    running must 409 and must NOT set the running job's cancel event. This is
+    the test that goes red if cancel ever reverts to bodyless
+    'cancel whatever is running'."""
+    go, _ = _gate(monkeypatch)
+    job_id = client.post("/api/index", json={"root": str(corpus)}, headers=AUTH).json()["job_id"]
+
+    r = client.post("/api/index/cancel", json={"job_id": "stale-or-wrong"}, headers=AUTH)
+    assert r.status_code == 409
+    job = client.app_state.index_job
+    assert job.status == "running"
+    assert not job.cancel.is_set(), "a mismatched cancel must not cancel the running job"
+
+    # The correct id still works: 202 and the event is set.
+    r = client.post("/api/index/cancel", json={"job_id": job_id}, headers=AUTH)
+    assert r.status_code == 202
+    assert job.cancel.is_set()
+    go.set()
+    assert _wait(lambda: client.app_state.index_job.status == "cancelled")
+
+
+def test_cancel_finished_job_id_is_409(client, corpus):
+    """An id naming a job that already finished is 'not the one running' → 409,
+    even though it's a real id the client legitimately held."""
+    job_id = client.post("/api/index", json={"root": str(corpus)}, headers=AUTH).json()["job_id"]
+    assert _wait(lambda: client.app_state.index_job.status == "done")
+
+    r = client.post("/api/index/cancel", json={"job_id": job_id}, headers=AUTH)
+    assert r.status_code == 409
 
 
 def test_not_wedged_after_cancel(client, corpus, monkeypatch):
     go, _ = _gate(monkeypatch)
-    client.post("/api/index", json={"root": str(corpus)}, headers=AUTH)
+    job_id = client.post("/api/index", json={"root": str(corpus)}, headers=AUTH).json()["job_id"]
     assert _wait(lambda: client.app_state.index_job is not None)
 
-    assert client.post("/api/index/cancel", headers=AUTH).status_code == 202
+    r = client.post("/api/index/cancel", json={"job_id": job_id}, headers=AUTH)
+    assert r.status_code == 202
     go.set()
     assert _wait(lambda: client.app_state.index_job.status == "cancelled")
 

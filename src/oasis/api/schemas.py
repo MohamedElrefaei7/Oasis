@@ -211,6 +211,18 @@ class JobResponse(ApiModel):
     status: str  # JobStatus value: running | done | cancelled | error
 
 
+class CancelRequest(ApiModel):
+    """Body of POST /api/index/cancel — cancel is bound to a specific job.
+
+    A bodyless "cancel whatever is running" loses a race once FSEvents-driven
+    auto-reindex exists: a cancel tap aimed at job N can arrive after N finished
+    and N+1 auto-started, and would silently kill N+1. The client holds the
+    job_id from the 202, so requiring it costs nothing and closes that race.
+    """
+
+    job_id: str
+
+
 # ---------------------------------------------------------------------------
 # SSE events (GET /api/index/events)
 #

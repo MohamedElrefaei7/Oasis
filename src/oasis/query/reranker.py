@@ -1,12 +1,21 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from typing import TYPE_CHECKING
 
 import numpy as np
-from sentence_transformers import CrossEncoder
 
 from oasis.index.keyword import MATCH_END, MATCH_START
 from oasis.query.retriever import HybridResult
+
+if TYPE_CHECKING:
+    from sentence_transformers import CrossEncoder
+else:
+    # NOT imported at module level — sentence_transformers pulls in PyTorch on
+    # import, and this module sits on every API/CLI import chain. Bound to the
+    # real class on first _load_model call; a None sentinel until then, which
+    # tests patch with a fake (also suppressing the import).
+    CrossEncoder = None
 
 DEFAULT_CE_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
@@ -15,7 +24,12 @@ _MODEL_CACHE: dict[str, CrossEncoder] = {}
 
 
 def _load_model(name: str) -> CrossEncoder:
+    global CrossEncoder
     if name not in _MODEL_CACHE:
+        if CrossEncoder is None:
+            from sentence_transformers import CrossEncoder as _CrossEncoder
+
+            CrossEncoder = _CrossEncoder
         _MODEL_CACHE[name] = CrossEncoder(name)
     return _MODEL_CACHE[name]
 
