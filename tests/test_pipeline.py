@@ -921,8 +921,10 @@ def test_extraction_failure_does_not_sweep_the_present_file(stores, tmp_path: Pa
     os.utime(c_path, (new_mtime, new_mtime))
 
     original_extract = TextExtractor.extract
+    extract_calls: list[str] = []
 
     def flaky_extract(self, path: Path):
+        extract_calls.append(path.name)
         if path.name == "c.txt":
             return None  # e.g. a transient I/O error the extractor swallowed
         return original_extract(self, path)
@@ -930,7 +932,14 @@ def test_extraction_failure_does_not_sweep_the_present_file(stores, tmp_path: Pa
     with patch.object(TextExtractor, "extract", flaky_extract):
         stats = index_directory(conn, tmp_path, vector_index=vi, embedder=emb)
 
+    # Prove C actually reached extract() rather than being silently skipped by
+    # is_unchanged (which would make every assertion below pass for the wrong
+    # reason — the skip path never touches the sweep or the failed counter).
+    assert extract_calls == ["c.txt"], (
+        f"expected only c.txt to be re-extracted (a/b unchanged), got {extract_calls}"
+    )
     assert stats["failed"] == 1  # the extraction failure is counted...
+    assert stats["skipped"] == 2  # a.txt, b.txt — unchanged, correctly not re-extracted
     assert stats["removed"] == 0  # ...but NOT as a sweep deletion
     assert idx.get_doc_id(c_path) == c_id  # row survives, same doc_id
     assert c_id in vi.doc_ids_with_vectors()  # prior vectors survive
