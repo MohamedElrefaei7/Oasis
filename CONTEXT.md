@@ -46,10 +46,10 @@ The project is doing well when these hold, and they are the only things that cou
 | Retrieval quality (best config, raw) | Beat the standing best; never silently regress | ndcg@10 **0.5602**, mrr 0.5427, recall@10 0.6844 |
 | NL parsing layer | Net-positive on the matrix *before* it's default | **−0.108 ndcg@10** — disabled by default |
 | Warm query latency | Establish a p95 budget, then hold it | **not yet measured** — measure via the HTTP service, warm |
-| App startup → ready | Fast enough that models-loading isn't the first impression | governed by the Tier-1 warm-start design |
+| App startup → ready | Fast enough that models-loading isn't the first impression | **measured 2026-07-17**: `t_handshake` ≈ **2–3.3 s** (spawn→handshake), `t_ready` ≈ **35–54 s** (handshake→`status:ready`, local-load-dominated, high variance). Long enough that the app must poll `/api/health` and never block — see `docs/APP_SEAM.md` |
 | Distribution | One double-click, signed + notarized, zero deps | not started (Tier 1) |
  
-Two of those rows are blanks on purpose: latency and startup have never been measured, and pretending a number exists is exactly the failure the eval discipline exists to prevent.
+Warm query latency is still a blank on purpose — it has never been measured and pretending a number exists is exactly the failure the eval discipline exists to prevent. **Startup→ready is now measured** (2026-07-17, via the app-seam spawn harness); it's an order-of-magnitude figure on a dev machine, not yet a p95 budget from the shipped bundle.
  
 ### Non-goals (scope boundaries)
  
@@ -83,7 +83,7 @@ Last resynced against the repo: **2026-07-17** (930 tests, all passing, torch-fr
 
 ## Current State
 
-Phases 1–5.1 complete: extraction, keyword index, vector index, hybrid retrieval, NL query parsing, CLI, and the evaluation harness. Phase 5.2 (HTTP API): **all endpoints implemented** — skeleton/handshake/model-lifecycle/health/auth/error-envelope (2026-07-15), `GET /api/search` + `POST /api/open` + capability markers (2026-07-15), `GET /api/status` + `POST /api/index` + SSE + cancel (2026-07-16), stale reconciliation + no-vector backfill + job-bound cancel (2026-07-17), and **`POST /api/reset` (2026-07-17)**. The full `CLAUDE.md` § HTTP API contract is now built.
+Phases 1–5.1 complete: extraction, keyword index, vector index, hybrid retrieval, NL query parsing, CLI, and the evaluation harness. Phase 5.2 (HTTP API): **all endpoints implemented** — skeleton/handshake/model-lifecycle/health/auth/error-envelope (2026-07-15), `GET /api/search` + `POST /api/open` + capability markers (2026-07-15), `GET /api/status` + `POST /api/index` + SSE + cancel (2026-07-16), stale reconciliation + no-vector backfill + job-bound cancel (2026-07-17), and **`POST /api/reset` (2026-07-17)**. The full `CLAUDE.md` § HTTP API contract is now built. **Phase 5.2 is closed** — tagged `service-layer-complete` (`734a84c`), the served retrieval path verified byte-identical to the direct eval harness, and the app spawn/handshake/readiness seam mapped + measured in `docs/APP_SEAM.md`. That doc is the entry point for the next phase, the native Swift app (Tier 1).
 
 ### Package structure
 
@@ -104,7 +104,7 @@ tests/                   32 test modules, 879 tests
 eval/
 ├── corpus/              301 labeled files + MANIFEST.md
 ├── queries.yaml         83 labeled queries
-├── run_eval.py, plot.py
+├── run_eval.py, plot.py, verify_served.py
 └── results/             latest.json, history.jsonl, metrics_over_time.png
 ```
 
@@ -224,6 +224,7 @@ Body `{path}`; opens an indexed file via `subprocess.run(["open", …])` (list f
 - Corpus copied with `cp -Rp` so **mtimes survive** — they encode 2019-01…2026-06 by filename hash, and ~18 date-tagged queries judge relevance by mtime.
 - `run_eval.py` builds a dedicated index under `eval/index/` (gitignored), parses each query exactly as the CLI does (fixed `today=2026-07-07`), runs `hybrid_search(top_n=20)` + rerank to 10, maps results back to corpus-relative keys, scores with **ranx**. Flags: `--reindex`, `--no-rerank`, `--no-parse`, `--today`.
 - Writes `results/latest.json` + appends `results/history.jsonl`; `plot.py` charts ndcg@10/precision@5/mrr over history.
+- **`verify_served.py`** — one-off seam check (not a history point): reuses everything above and swaps only the retrieval call to prove `GET /api/search` returns rankings byte-identical to direct `hybrid_search`+CE. Writes `results/served_verification.json`. Run when the served path or `run_search`'s over-fetch could have drifted from the harness.
 
 > ### 🔴 HEADLINE FINDING: NL parsing makes retrieval **worse**, not better
 >
@@ -457,6 +458,10 @@ Landed ahead of the API so `api/` can be written against a stable pipeline:
 - OCR fallback for scanned PDFs.
 
 ### Recently done (2026-07-17)
+- **Phase 5.2 closeout — tag, served-path verification, app-seam map** (three parts, no product code):
+  - **Tag `service-layer-complete`** (annotated, at `734a84c`, pushed to `Oasis`) — the last single-language / single-`pytest` baseline before Swift. What makes later two-toolchain bisection possible.
+  - **Served path verified equivalent to the direct harness** (`eval/verify_served.py`, result in `eval/results/served_verification.json` — a one-off seam check, deliberately **not** in `history.jsonl`). Reuses `run_eval.py`'s machinery wholesale (query load, eval index, qrels, `_relpath`, ranx) and swaps only the retrieval seam: direct `hybrid_search(top_n=20)`+CE-to-10 vs the same index through `GET /api/search?mode=hybrid&limit=10&raw=true` (in-process `TestClient`, real models). Result at the canonical raw-hybrid config: **all five metrics byte-identical (Δ = 0.0), 0/83 ranking mismatches**, and candidate over-fetch matches (20/20 → rerank to 10 — the reconcile the prompt flagged: `run_search`'s `max(limit*2,20)` equals the harness's `CANDIDATE_TOP_N`). Direct block also reproduced the canonical numbers exactly (ndcg 0.5602, mrr 0.5427, recall 0.6844). The `/api/search` seam is safe to build the Swift app on.
+  - **App spawn/handshake/readiness seam mapped and measured** → `docs/APP_SEAM.md`, every claim verified by an actual spawn (transcripts pasted in the doc), not read off `serve.py`. Measured: **stdout is pure** — first line is the `{port,token,pid}` handshake, **zero** stdout after it, all uvicorn/HF/model logs and even the failure traceback on **stderr** (the seam the "read one JSON line" parser depends on); `t_handshake` ≈ **2–3.3 s**, `t_ready` ≈ **35–54 s** (local-load-dominated, high variance — long enough that a blocked first request flirts with URLSession's ~60 s timeout, which is the concrete case for poll-health-never-block); the **error path forced live** (`HF_HUB_OFFLINE=1` + empty cache → `/api/health` 200 `status:error` with the real message). Fills the startup→ready row in the North Star table. Watchdog/shutdown (§5) and the child-dies-after-ready path reasoned from `serve.py`, marked as such.
 - **`POST /api/reset`** — the last Phase 5.2 endpoint. Deletes the index and stands up an empty one without a restart. The deletion is trivial; the commit is the **swap** — four commits made `VectorIndex` one shared handle every search reads and the index job writes through (the reason search-during-index is fresh), and reset destroys and replaces that handle while searches may be mid-flight against it. This is the inverse of the invariant those commits protected.
   - **Endpoint** (`api/reset.py`, on `protected_router`): body `{confirm: bool}` → `400` unless `confirm: true` (no interactive prompt over HTTP; a bare/empty body must not nuke the index — `confirm` defaults False so `{}` is a clean 400, not 422). Takes the **same `job_lock` as `/api/index`** and `409`s while a job runs — reset drops the handle the job writes through, so they're mutually exclusive; the whole reset runs under the lock. `404` if no index at `db_path`. `204` on success. Post-reset: `/api/status` → `200` 0-docs, `/api/search` → `200 []`, next `/api/index` repopulates.
   - **The swap** (`AppState.reset_index()`, under the lock): (1) in-flight searches hold the OLD handle for their call's life and degrade cleanly when reset `rmtree`s its `.lance` files — LanceDB raises a `RuntimeError` (IO error), which the hybrid **vector arm already catches** (`except Exception`, comment added); only *subsequent* searches read the new handle, which is why `api/search.py` reads `state.vector_index` fresh per request (verified it isn't captured at startup). (2) Rebuild not `checkout_latest` — the versions are gone with the dir; a fresh `VectorIndex` is installed as the shared instance. (3) **Deletion order markers → vectors → documents**: no `vectors_built` marker outlives its vectors, so a crash mid-reset reads as the conservative "reindex needed", never "semantic-ready with no vectors". (4) SQLite cleared **in place** (`KeywordIndex.clear_meta()` + `clear_documents()`, the `_ad` trigger clearing FTS) rather than unlinked — safer for in-flight readers than deleting a file under open connections, and leaves `/api/status` a true empty index rather than a 404 — then `invalidate()`d. *(This is the one deviation from the earlier CLAUDE.md text, which said "delete the .db file / 404"; clear-in-place is the safer swap and CLAUDE.md is reconciled.)*
