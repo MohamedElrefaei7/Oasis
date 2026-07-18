@@ -1,0 +1,47 @@
+{
+  "passed": true,
+  "rankings_identical": true,
+  "metrics_within_tolerance": true,
+  "tolerance": 1e-06,
+  "num_queries_total": 83,
+  "num_queries_scored": 80,
+  "num_queries_ranking_mismatch": 0,
+  "candidate_counts": {
+    "direct": {
+      "over_fetch": 20,
+      "rerank_to": 10
+    },
+    "served": {
+      "over_fetch": 20,
+      "rerank_to": 10
+    },
+    "match": true
+  },
+  "config": {
+    "mode": "hybrid",
+    "limit": 10,
+    "raw": true
+  },
+  "direct": {
+    "precision@5": 0.225,
+    "precision@10": 0.1338,
+    "recall@10": 0.6844,
+    "mrr": 0.5427,
+    "ndcg@10": 0.5602
+  },
+  "served": {
+    "precision@5": 0.225,
+    "precision@10": 0.1338,
+    "recall@10": 0.6844,
+    "mrr": 0.5427,
+    "ndcg@10": 0.5602
+  },
+  "delta": {
+    "precision@5": 0.0,
+    "precision@10": 0.0,
+    "recall@10": 0.0,
+    "mrr": 0.0,
+    "ndcg@10": 0.0
+  },
+  "mismatches": []
+}
