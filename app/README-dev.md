@@ -66,14 +66,43 @@ case:
 
 ## Project settings worth knowing about
 
-Two settings on the Xcode template had to change for any of this to work:
+Two settings differ from the Xcode template. Both are settled decisions, not
+temporary ones.
 
-- **`ENABLE_APP_SANDBOX = NO`.** A sandboxed app can't exec an arbitrary binary
-  outside its bundle, and can't reach `~/.oasis/index.db`. Re-enabling the
-  sandbox is a real decision for the bundled-binary release (it needs
-  `com.apple.security.network.client` for the loopback connection, plus a story
-  for the index location and Full Disk Access) — not something to flip back on
-  casually.
+- **`ENABLE_APP_SANDBOX = NO` — permanent, and what this architecture *is*.**
+  App Sandbox is mandatory only for Mac App Store distribution, which is a
+  stated non-goal; Oasis ships as a signed, notarized, directly-downloaded
+  `.app`. The two things the app fundamentally does — **spawn the server child**
+  (a binary outside the app bundle) and **index arbitrary user-chosen folders** —
+  are both things the sandbox exists to forbid. Sandbox-off isn't a shortcut
+  taken to get a dev build running; it's the correct configuration for a
+  directly-distributed local file-search tool.
+
+  Two things it does *not* cost:
+  - **Not a privacy tradeoff.** The sandbox governs what the app can reach *on
+    this machine*, not what leaves it — and nothing leaves it either way:
+    loopback-only binding, bearer-token auth, no telemetry, `access_log=False`
+    so queries aren't even written to a log. Orthogonal to the privacy north
+    star, which is about the network boundary.
+  - **Not a barrier to notarization.** An unsandboxed Developer ID app
+    notarizes fine; notarization requires the hardened runtime and a valid
+    signature, not the sandbox. Tier 1's "signed + notarized, one double-click"
+    stays fully open.
+
+  Re-enabling the sandbox would mean re-architecting both the child-spawn and
+  the arbitrary-folder indexing — out of scope unless the App Store is ever
+  pursued, which is a non-goal.
+
 - **`SUPPORTED_PLATFORMS = macosx`.** The template was multiplatform
   (iOS/xrOS); `Process`, `NSApplicationDelegateAdaptor`, and spawning a child at
   all are macOS-only.
+
+### Full Disk Access is still required
+
+Independent of the sandbox decision. TCC gates the protected directories
+(Desktop, Documents, Downloads, and friends) for **unsandboxed apps too**, so
+indexing `~/Documents` needs Full Disk Access no matter how the sandbox flag is
+set. This was always coming, and the server already anticipates it: the pipeline
+counts `permission_denied` separately from `failed` precisely so the app can
+show a "Grant Full Disk Access" flow instead of a useless "indexed 0 files"
+empty state. It stays a Tier-1 first-run item.
