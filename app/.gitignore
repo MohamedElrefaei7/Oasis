@@ -1,0 +1,27 @@
+# Xcode — scoped to app/ so the repo-root .gitignore stays a Python file.
+#
+# Note what is NOT ignored: xcshareddata/ is committed on purpose. The shared
+# scheme carries the OASIS_SERVE_BIN environment variable the dev run needs
+# (see README-dev.md), so it belongs in the repo.
+
+## User state
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+*.xccheckout
+
+## Build products
+build/
+DerivedData/
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+## Swift Package Manager
+.swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
+.build/
+
+## macOS
+.DS_Store
