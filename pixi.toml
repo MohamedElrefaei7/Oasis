@@ -1,0 +1,111 @@
+# Oasis environment definition.
+#
+# pixi replaced uv as the top-level manager on 2026-07-25. The reason is
+# singular: every stock macOS-arm64 torch wheel on PyPI links Apple's
+# Accelerate BLAS, whose SGEMV path returns all-NaN logits (and SIGBUSes on
+# some shapes) from the cross-encoder's CPU inference on this macOS. conda-forge
+# is the only channel packaging an OpenBLAS-linked torch, so torch must come
+# from conda — while lancedb and ranx must come from PyPI. pixi is what holds
+# both halves under one lockfile; see CONTEXT.md for the full decision.
+#
+# uv did not leave: pixi uses it internally to resolve the PyPI half.
+
+[workspace]
+name = "oasis"
+channels = ["conda-forge"]
+platforms = ["osx-arm64"]
+
+# ---------------------------------------------------------------------------
+# default feature — RUNTIME ONLY. This is the freeze target.
+#
+# Nothing here that the app doesn't need at runtime: no pytest, no ranx, no
+# matplotlib, no pyinstaller. That split is not cosmetic — in the flat spike
+# env, eval-only tooling (llvmlite + matplotlib, ~136 MB) landed in the frozen
+# bundle, and llvmlite alone was the single largest non-torch artifact.
+# ---------------------------------------------------------------------------
+
+[dependencies]
+python = "3.14.*"
+
+# The whole point of the migration. conda-forge's osx-arm64 build links
+# OpenBLAS (BLAS_INFO=open) and still ships MPS, so this one package covers
+# both the shipped CPU path and the OASIS_DEVICE=mps diagnostic path.
+pytorch = "2.13.*"
+
+# Capped <2.5 by the eval feature: ranx -> numba, and every released numba
+# requires numpy<2.5 while conda-forge's default is 2.5.1. The cap lives here,
+# in the runtime feature, rather than in `eval`, because default and dev share
+# a solve-group (see [environments]) — so the numpy that ships is by
+# construction the numpy the tests and eval ran against. Letting them diverge
+# would reintroduce exactly the tested-isn't-shipped skew this migration exists
+# to remove, on the library torch shares an ABI boundary with.
+numpy = ">=2.2,<2.5"
+
+# Model stack from conda-forge so it resolves against the conda torch rather
+# than dragging an Accelerate wheel in behind it.
+sentence-transformers = ">=5.5.0"
+transformers = "*"
+
+# Runtime deps, mirroring [project.dependencies] in pyproject.toml.
+dateparser = ">=1.4.0"
+fastapi = ">=0.139.0"
+instructor = ">=1.15.1"
+langdetect = ">=1.0.9"
+openpyxl = ">=3.1.5"
+pathspec = ">=1.1.1"
+pydantic = ">=2.13.4"
+pydantic-settings = ">=2.14.1"
+pypdf = ">=6.11.0"
+python-docx = ">=1.2.0"
+python-pptx = ">=1.0.2"
+rich = ">=14.3.4"
+tiktoken = ">=0.13.0"
+typer = ">=0.25.1"
+uvicorn = ">=0.51.0"
+watchdog = ">=6.0.0"
+
+[pypi-dependencies]
+# conda-forge carries only lancedb 0.30.0. Version re-confirmed by measurement,
+# not by resolution — see [pypi-dependencies] note in CONTEXT.md and the
+# search-during-index regression test.
+lancedb = ">=0.30.2"
+
+oasis = { path = ".", editable = true }
+
+# ---------------------------------------------------------------------------
+# Non-runtime features. None of these may appear in the default environment.
+# ---------------------------------------------------------------------------
+
+[feature.test.dependencies]
+pytest = ">=9.0.3"
+httpx = ">=0.28.1"
+mypy = ">=2.1.0"
+ruff = ">=0.15.13"
+
+[feature.eval.dependencies]
+matplotlib = ">=3.11.0"
+pyyaml = ">=6.0.3"
+
+[feature.eval.pypi-dependencies]
+# Absent from conda-forge. Drags numba -> llvmlite (~123 MB), which is the
+# reason `eval` is a separate feature.
+ranx = ">=0.3.21"
+
+[feature.build.pypi-dependencies]
+pyinstaller = "*"
+
+# ---------------------------------------------------------------------------
+# Environments
+#
+# `default` is the runtime env and the freeze target: default feature alone.
+# `dev` adds test + eval + build for actually working on the project.
+#
+# Both share one solve-group so the versions are identical across them. Without
+# it the two environments solve independently and the numpy (or torch) that
+# ships could differ from the one the suite and the eval matrix ran against —
+# the precise class of skew that motivated the migration.
+# ---------------------------------------------------------------------------
+
+[environments]
+default = { solve-group = "main" }
+dev = { features = ["test", "eval", "build"], solve-group = "main" }

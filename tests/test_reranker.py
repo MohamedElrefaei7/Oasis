@@ -100,15 +100,15 @@ def test_clean_empty_string() -> None:
 def test_load_model_returns_cross_encoder_instance() -> None:
     with patch("oasis.query.reranker.CrossEncoder") as MockCE:
         MockCE.return_value = _fake_model([])
-        result = _load_model("test-model")
+        result = _load_model("test-model", "cpu")
     assert result is MockCE.return_value
 
 
 def test_load_model_same_name_returns_cached() -> None:
     with patch("oasis.query.reranker.CrossEncoder") as MockCE:
         MockCE.return_value = _fake_model([])
-        first = _load_model("model-a")
-        second = _load_model("model-a")
+        first = _load_model("model-a", "cpu")
+        second = _load_model("model-a", "cpu")
     assert first is second
     assert MockCE.call_count == 1
 
@@ -116,16 +116,16 @@ def test_load_model_same_name_returns_cached() -> None:
 def test_load_model_different_names_load_separately() -> None:
     with patch("oasis.query.reranker.CrossEncoder") as MockCE:
         MockCE.side_effect = [_fake_model([]), _fake_model([])]
-        _load_model("model-a")
-        _load_model("model-b")
+        _load_model("model-a", "cpu")
+        _load_model("model-b", "cpu")
     assert MockCE.call_count == 2
 
 
 def test_load_model_populates_cache() -> None:
     with patch("oasis.query.reranker.CrossEncoder") as MockCE:
         MockCE.return_value = _fake_model([])
-        _load_model("my-model")
-    assert "my-model" in reranker_mod._MODEL_CACHE
+        _load_model("my-model", "cpu")
+    assert ("my-model", "cpu") in reranker_mod._MODEL_CACHE
 
 
 def test_second_reranker_shares_model() -> None:
@@ -150,14 +150,14 @@ def test_custom_model_name_forwarded() -> None:
     with patch("oasis.query.reranker.CrossEncoder") as MockCE:
         MockCE.return_value = _fake_model([])
         CrossEncoderReranker(model_name="my-custom-ce")
-    MockCE.assert_called_once_with("my-custom-ce")
+    MockCE.assert_called_once_with("my-custom-ce", device="cpu")
 
 
 def test_default_model_name_used_when_not_specified() -> None:
     with patch("oasis.query.reranker.CrossEncoder") as MockCE:
         MockCE.return_value = _fake_model([])
         CrossEncoderReranker()
-    MockCE.assert_called_once_with(DEFAULT_CE_MODEL)
+    MockCE.assert_called_once_with(DEFAULT_CE_MODEL, device="cpu")
 
 
 # ---------------------------------------------------------------------------

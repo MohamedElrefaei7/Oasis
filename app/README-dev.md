@@ -27,7 +27,10 @@ Scheme… ▸ Run ▸ Arguments ▸ Environment Variables**. Note that an app la
 by Xcode does *not* inherit your shell environment, so exporting the variable in
 `.zshrc` will not work — it has to be on the scheme.
 
-Prerequisite for that path existing at all: `uv sync` at the repo root.
+Prerequisite for that path existing at all: `pixi install` at the repo root. The
+binary then lives at `.pixi/envs/default/bin/oasis` — **note the path changed
+with the pixi migration (2026-07-25)**; a scheme still pointing at the old
+`.venv/bin/oasis` will fail with `.failed`, naming the stale path.
 
 > **Release note.** The shipped app will spawn the PyInstaller `oasis` binary
 > bundled inside the `.app` instead (`APP_SEAM.md` §1). That branch is marked

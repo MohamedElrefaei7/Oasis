@@ -43,7 +43,7 @@ The project is doing well when these hold, and they are the only things that cou
  
 | Dimension | Target | Current |
 |---|---|---|
-| Retrieval quality (best config, raw) | Beat the standing best; never silently regress | ndcg@10 **0.5602**, mrr 0.5427, recall@10 0.6844 |
+| Retrieval quality (best config, raw) | Beat the standing best; never silently regress | ndcg@10 **0.5601**, mrr 0.5427, recall@10 0.6844 — restated 2026-07-25 on the pixi/OpenBLAS-CPU stack (was 0.5602; 2 of 80 queries reordered within top-10, see Recently done) |
 | NL parsing layer | Net-positive on the matrix *before* it's default | **−0.108 ndcg@10** — disabled by default |
 | Warm query latency | Establish a p95 budget, then hold it | **not yet measured** — measure via the HTTP service, warm |
 | App startup → ready | Fast enough that models-loading isn't the first impression | **measured 2026-07-17**: `t_handshake` ≈ **2–3.3 s** (spawn→handshake), `t_ready` ≈ **35–54 s** (handshake→`status:ready`, local-load-dominated, high variance). Long enough that the app must poll `/api/health` and never block — see `docs/APP_SEAM.md` |
@@ -240,6 +240,8 @@ Body `{path}`; opens an indexed file via `subprocess.run(["open", …])` (list f
 > | hybrid (RRF) | 0.4884 | 0.4246 | −0.064 | 0.6500 | 0.5260 | −0.124 |
 > | **hybrid + CE** | **0.5602** | 0.4522 | **−0.108** | **0.6844** | 0.5490 | **−0.135** |
 >
+> *(Absolute values are pre-migration-stack, 2026-07-14, and stay as measured — all eight cells came from one frozen parse set. The current raw hybrid+CE canonical is 0.5601 ndcg@10 on the pixi/OpenBLAS-CPU stack; the **Δ** column, which is the finding, is unaffected by a two-query intra-top-10 reorder.)*
+>
 > **The best configuration Oasis has is `--raw`** — i.e. the NL parsing layer switched off. Parsing only helps keyword mode, and only because it rescues BM25 from being fed a whole sentence.
 >
 > **Why — two independent mechanisms, both verified per-query.** 19 of 80 queries went from finding the answer to finding *nothing* (several `recall 1.00 → 0.00`):
@@ -279,7 +281,11 @@ Body `{path}`; opens an indexed file via `subprocess.run(["open", …])` (list f
 | hybrid (RRF) | 0.4884 | 0.4632 | 0.6500 | 0.1975 | 0.1275 |
 | **hybrid + CE rerank** | **0.5602** | **0.5427** | **0.6844** | **0.2250** | **0.1338** |
 
-Reproduce: `uv run python eval/run_eval.py --mode {keyword,semantic,hybrid} [--no-rerank] --no-parse --no-history --out eval/results/ablations/NAME.json`.
+> **These four rows are a 2026-07-14 measurement set on the pre-migration stack** (PyPI torch 2.12, MPS) and are **left exactly as measured**. All four were produced together, so they are only comparable to each other; restating one cell from a later run would silently corrupt the between-mode comparison the table exists for.
+>
+> **The current canonical, on the shipped stack** (pixi / conda-forge torch 2.13 / OpenBLAS / CPU, 2026-07-25) is the `hybrid + CE rerank` row restated as **ndcg@10 0.5601, mrr 0.5427, recall@10 0.6844, p@5 0.2275, p@10 0.1338** — two of 80 queries reordered within their top-10 and nothing else moved. The other three modes have not been re-measured on the new stack; when they are, the whole table gets regenerated as a set rather than patched.
+
+Reproduce: `pixi run -e dev python eval/run_eval.py --mode {keyword,semantic,hybrid} [--no-rerank] --no-parse --no-history --out eval/results/ablations/NAME.json`.
 
 The one solid read: **the cross-encoder is doing real work** — it's the only step that converts RRF's better recall (0.65 vs 0.617) into better ranking (+0.072 ndcg over raw fusion), and it's parser-independent.
 
@@ -299,7 +305,11 @@ The jump is entirely from splitting `hybrid_search`'s try blocks (below). 10 of 
 
 ---
 
-## Tests — 930, all passing
+## Tests — 941, all passing
+
+Run with `pixi run -e dev pytest` (fast: 938 + 3 `slow` deselected) or `pixi run -e dev pytest -m ''` (all 941). Slow tests load real models on CPU.
+
+New 2026-07-25 (device + migration): `test_device.py` (11) — `resolve_device` precedence, `(model_name, device)` cache-key composition asserted without ever constructing an MPS context, and three `slow` tests that inspect the *loaded* model's real device rather than the string passed in. `test_cpu_cross_encoder_returns_finite_scores` is the ex-`xfail(strict=True)` tripwire on the realistic batch shape that Accelerate NaN'd.
 
 New 2026-07-17 (`POST /api/reset`): `test_api_reset.py` (8) — reset-while-indexing → 409 with the index untouched (job-lock mutual exclusion); **the barrier-driven search-racing-reset test** (a search held in-flight holding the OLD `VectorIndex` handle, released into the dropped table after reset → 200 well-formed, never 500 — mutation-tested: narrowing the vector arm's `except` makes it fail with the exact LanceDB file-not-found `RuntimeError`); reset → empty status/search → reindex → new content found via **both** hybrid and semantic (the semantic hit proves the *rebuilt* handle is in use); crash-between-stores simulated (clear_meta + rmtree, documents intact) reads honestly as `reindex_recommended: true`; plus 400-without-confirm, 401, 404-no-index, and 204-idempotent.
 
@@ -446,7 +456,7 @@ Landed ahead of the API so `api/` can be written against a stable pipeline:
 
 - ~~**Implement the remaining HTTP API endpoints**~~ **All Phase 5.2 endpoints landed** — skeleton, `/api/search`, `/api/open`, `/api/status`, `/api/index` + SSE + cancel, and **`/api/reset` (2026-07-17)**. The search-during-index and search-racing-reset regressions are both built (`test_api_index.py`, `test_api_reset.py`). The `CLAUDE.md` § HTTP API contract is fully implemented; remaining work is the Swift app, not the server.
   - ~~**Design for the NEXT index commit — stale reconciliation + no-vector backfill**~~ **Both landed 2026-07-17** — see Recently done. The sweep gates inside the pipeline on cancel + census cleanliness (equivalent to the planned `status == "done"` gate, decided at the only place holding the seen-set); backfill embeds unchanged-but-unvectored docs. Deferred refinements recorded there: partial-chunk-set detection (a crash mid-embed reads as vectored; `--force` is the escape hatch) and per-subtree permission-denied exclusion (the coarse whole-sweep skip is the deliberate first cut).
-- **Swift app, step 2 and beyond.** Step 1 (lifecycle seam) is done — see Recently done (2026-07-25). Next up, roughly in order: the search field gated on `.ready` (it needs the handshake `token` as `Authorization: Bearer`, already captured and unused), result rendering from the segment snippets, the menu-bar item + floating panel, then the index/onboarding flows keyed off `documents`/`reindex_recommended` (§6e's "two shapes both mean empty"). One open thread from step 1: the bundled-binary spawn path for release (`RELEASE TODO` in `ServerController.resolveServerBinary()`). The sandbox is **not** an open thread — `ENABLE_APP_SANDBOX = NO` is permanent and correct for a directly-distributed app (see Recently done, 2026-07-25). The genuine permission work is **Full Disk Access**, which TCC requires of unsandboxed apps too and which the `permission_denied` counter already anticipates — a Tier-1 first-run flow, not a sandbox question.
+- **Swift app, step 3 and beyond.** Steps 1 (lifecycle seam) and 2 (main window + search) are done — see Recently done (2026-07-25). Next up, roughly in order: wire the five inert rail controls, each marked `// TODO: step N` in `ContentView.swift` — **Index New Folder** (`NSOpenPanel` → `POST /api/index` → SSE progress) and **Reindex Current Folders** first, since they're what the `.empty` onboarding state points at and nothing can be indexed from the app until they exist; then the Statistics panel's real fields from `GET /api/status`; then **Reset Indexing** (`POST /api/reset {confirm:true}`) and **Settings**. After that the menu-bar item + floating panel, opening a result via `POST /api/open`, and the `reindex_recommended` prompt. One open thread from step 1: the bundled-binary spawn path for release (`RELEASE TODO` in `ServerController.resolveServerBinary()`). The sandbox is **not** an open thread — `ENABLE_APP_SANDBOX = NO` is permanent and correct for a directly-distributed app (see Recently done, 2026-07-25). The genuine permission work is **Full Disk Access**, which TCC requires of unsandboxed apps too and which the `permission_denied` counter already anticipates — a Tier-1 first-run flow, not a sandbox question.
 - **Migrate the CLI's search command to `query/search.py:run_search()`** — the API already uses it; the CLI still carries its own copy of the mode dispatch (deliberate temporary duplication, one-engine direction). Decide then whether the CLI's rerank query moves from `semantic_query` to the raw query to match the API.
 - **The real `~/.oasis` index has no embeddings** (built June 3, pre-vector). Re-index to populate `index.lance`. **Detection is now handled** — `/api/health` reports `documents: 877, schema_version: 0, semantic_ready: false, reindex_recommended: true` against it (verified live 2026-07-16), so the app gets a single server-derived boolean to act on instead of doing version math; what's left is the app-side UX for that prompt. **Repair no longer needs `--force` (2026-07-17): the no-vector backfill makes a plain `oasis index` embed unchanged-but-unvectored docs**, so the plain reindex the app will offer actually flips `semantic_ready` true (verified live against a copy of the real index).
 - **🔴 Make the NL filters soft, and stop distilling the embedding query.** The measured headline finding (top of Evaluation): parsing costs −0.108 ndcg@10 / −0.135 recall@10 on hybrid+CE. Two fixes, both small:
@@ -461,7 +471,166 @@ Landed ahead of the API so `api/` can be written against a stable pipeline:
 - UTF-8-only text extractor can't read latin-1 files (`edge-latin1-menu.txt` in the corpus).
 - OCR fallback for scanned PDFs.
 
+### ✅ CPU inference block — RESOLVED and shipped (2026-07-25)
+
+> **Closed.** The migration landed, CPU is the default, and the matrix was re-measured on the shipped stack. Kept in full below because the diagnosis — Accelerate's SGEMV as a *silent* NaN source, and everything ruled out on the way — is the reason the constraint in `CLAUDE.md` ("never move torch to the PyPI half") exists. The remaining bundle items moved to the freeze work; they were never part of this block.
+
+
+**Resolved: the blocker is Apple's Accelerate BLAS, not any torch version or Oasis code. conda-forge's OpenBLAS torch fixes it, and the fix survives PyInstaller freezing — proven finite both unfrozen and inside a frozen binary, with the bundled dylib's provenance verified.** The device plumbing stays uncommitted pending the four items in "Still owed" below; this entry records the diagnosis and the spike that resolves the shippability fork.
+
+#### The trail
+
+1. The Swift app spawns `oasis serve` as a child of a GUI process. The cross-encoder's first **MPS** inference aborts in Metal validation (`validateComputeFunctionArguments`, SIGABRT); the server dies and the app sees connection-refused. MPS works when spawned from a shell — even under `env -i` — so the trigger is the Metal device context an MPS subprocess inherits from a GUI parent, not a missing env var. Unfixable across arbitrary downloader Macs.
+2. Decision B: default inference to **CPU** (portable, deterministic, the interim before Core ML/MLX). Engine plumbing built — `device.py` `resolve_device()`, `device` params on both wrappers, `(model_name, device)` cache keys — and green.
+3. The CPU matrix re-run crashed at q042. The cross-encoder's **CPU** path is broken shape-dependently: some shapes SIGBUS in Accelerate's `cblas_sgemv` (`EXC_ARM_DA_ALIGN`), others silently return **all-NaN** logits (6/6 on a realistic-snippet batch; short inputs pass). Embedder CPU fine; plain torch CPU matmul fine; same inputs on MPS correct. So CPU traded a loud crash for a silent one — strictly worse, and the reason nothing shipped.
+
+   | Input shape | CPU result (Accelerate) |
+   |---|---|
+   | Short pairs (`"whale"` / `"moby dick the whale"`), batch 1–3 | correct logits (9.73, 8.26) |
+   | Realistic snippet lengths, batch ≥ 2 | **all-NaN logits** — 6/6 runs |
+   | Some single-pair shapes (short snippet, batch 1) | **SIGBUS** — `EXC_ARM_DA_ALIGN` in `cblas_sgemv`, via torch CPU `addmm` → `linear` |
+
+4. Nine builds tested against the realistic reproducer — torch 2.9.0 / 2.9.1 / 2.10.0 / 2.11.0 / 2.12.0 (clean reinstall) / 2.12.1 / 2.13.0 / 2.14.0.dev nightly, plus 2.13.0 on **Python 3.13** — i.e. every cp314 macOS-arm64 wheel on PyPI, plus nightly, plus the interpreter-downgrade escape route. **All NaN, all `BLAS_INFO=accelerate`.** Not a version regression: every stock arm64 wheel links Accelerate, and Accelerate on this macOS (Darwin 25.3) is the broken backend. The version lever leads nowhere.
+5. conda-forge torch links **OpenBLAS** (`BLAS_INFO=open`), not Accelerate. The reproducer returns finite CPU scores unfrozen.
+6. **Spike (below): OpenBLAS survives PyInstaller freezing.** Frozen binary reports `BLAS_INFO=open`, runs CPU, returns byte-identical finite scores; under `env -i` with no conda env reachable, dyld loads the **bundled** `dist/reproduce/_internal/libopenblas.0.dylib` — proven to be the frozen copy, not one leaking from the environment.
+
+#### The freeze spike
+
+Env `oasis-blas-test` (conda-forge torch 2.13.0, Python 3.14.6, `BLAS_INFO=open`), minimal reproducer only — not the real server. Same batch unfrozen and frozen: `[-10.2319, -11.1282, -11.1259]`, `all finite: True`, relevant snippet ranked first, both times.
+
+- **Working recipe:** `pyinstaller --onedir --collect-all torch --collect-all sentence_transformers --collect-all transformers --collect-data tokenizers`. **No `--add-binary` needed** — the env's OpenBLAS lives in `$CONDA_PREFIX/lib`, reached via torch's `_C…so` `LC_RPATH @loader_path/../../../`; PyInstaller's macholib follows the rpath, copies `libopenblas` + `lib{blas,cblas,lapack}` into `_internal/`, and rewrites the rpath to `@loader_path/..`. The chain-rpath relocated intact. This was the predicted failure point and it resolved itself.
+- **Gotcha that will bite the real server freeze:** frozen torch respawn-loops (PIDs churning ~3s, orphaning to PPID 1) because torch's multiprocessing resource-tracker re-execs the binary, and PyInstaller's hook only diverts it if the app calls `freeze_support()`. Fix: `multiprocessing.freeze_support()` at `__main__` **before** importing torch (so diverted helpers don't pay a full torch import). This is a property of freezing torch, not of the reproducer — carry it into the `oasis serve` freeze.
+- **Size:** 827M (`dist/reproduce/`). ~237M is a duplicated `libtorch_cpu.dylib`; scipy+sklearn (51M) ride in via sentence-transformers; OpenBLAS itself is 13M. A real bundle trims well under 827M with excludes — the BLAS fix is near-free, the weight is torch.
+- **Caveat:** Accelerate's `libBLAS`/`libLAPACK` remain mapped into the process (delay-loaded via system frameworks). torch does not route through them, but the bundle cannot be called "Accelerate-free."
+
+#### Resolved vs still owed
+
+**Resolved — the scary unknown:** a working CPU BLAS can be gotten into a PyInstaller bundle. OpenBLAS-via-conda is technically viable end-to-end through the freeze boundary.
+
+**Still owed before the device-CPU flip commits:**
+
+- ~~**Pixi-verification spike — gates every item below it.**~~ **Both caveats cleared 2026-07-25** — one lock over both halves, and the frozen pixi env keeps OpenBLAS with the recipe unchanged. See the spike entry below.
+- ~~**Canonical matrix re-run on OpenBLAS CPU**~~ **Done 2026-07-25 — restated to 0.5601, BLAS proven neutral.** The MPS control and the CPU run are identical on all five metrics *and* on all 80 per-query score sets, so the OpenBLAS/device effect is exactly zero; the −0.0001 ndcg@10 / +0.0025 p@5 delta against the old canonical is the version stack, and it is two queries reordering inside their top-10. See Recently done.
+- **Real `oasis serve` freeze** — the minimal reproducer omits fastapi/uvicorn and **LanceDB native (Rust) libs**, a separate bundling risk; plus the `freeze_support()` fix above.
+- **Offline + weights bundling** — spike used the online HF cache; the ship must run `HF_HUB_OFFLINE` with weights inside the bundle.
+- **`.app` wrapper + ad-hoc signing + hardened-runtime-meets-dylibs** — deferred distribution layer.
+
+~~**Open decision — how OpenBLAS torch enters the project**~~ **Decided 2026-07-25: one pixi-managed environment** — see the next entry for the mechanism and the three findings that settled it. Device plumbing (`device.py`, wrapper params, cache keys, resolver + slow tests) remains green in the working tree and **uncommitted** until the migration lands and the matrix reproduces.
+
+#### Carried over — still live
+
+- **The self-announcing gate will fire on the swap.** `tests/test_device.py::test_cpu_cross_encoder_returns_finite_scores` is `slow` + `xfail(strict=True)` on the realistic shape (a toy batch would xpass and defeat the marker). Under Accelerate it xfails. **Under OpenBLAS it xpasses, and `strict=True` turns that into a hard failure** — by design: whoever lands the OpenBLAS torch is forced to remove the marker and flip the default in the same change. Caveat recorded in the test: SIGBUS shapes kill the process outright and pytest cannot catch those, so the catchable NaN shape is the one encoded.
+- **Danger of the silent mode, for whoever re-runs the matrix.** NaN scores don't raise, and `sorted()` on NaN keys leaves order essentially untouched, so a NaN reranker degrades to "no reranking" *invisibly* — it would have quietly deleted the measured +14.7% cross-encoder lift with no error anywhere. One CPU eval run reported ndcg@10 0.4246 having reranked 74 times / 1079 pairs through a NaN cross-encoder; those numbers measure a broken reranker and were **not** published. Two invalid rows reached `eval/results/history.jsonl` and were scrubbed (`git checkout`); all diagnostic runs use `--no-history --out`.
+- **Ruled out earlier, still ruled out:** install corruption (clean venv reinstall reproduces), and every thread-count knob (`torch.set_num_threads(1)`, `OMP_NUM_THREADS=1`, `VECLIB_MAXIMUM_THREADS=1`). BLAS backend is a build-time choice — there is no runtime toggle off Accelerate, which is exactly why the fix had to be a different *build*.
+- **Interim dogfooding:** `OASIS_DEVICE=mps` still works for non-GUI launches (conda-forge's `cpu_generic` torch ships MPS). **On the migrated stack it is metric-identical to CPU** — same five aggregates, same 80 per-query scores — so it is now a diagnostic lever rather than a fallback. The old-stack MPS figures were ndcg@10 0.5602 / mrr 0.5427 / recall@10 0.6844 / p@5 0.2250 / p@10 0.1338; the migrated stack reads 0.5601 / 0.5427 / 0.6844 / 0.2275 / 0.1338 on *both* devices.
+- **Still not an option: shipping MPS with a GUI-spawn workaround.** A broken CPU BLAS is a one-time build swap you fix; an MPS abort in a GUI-spawned subprocess is a Metal-context problem that cannot be fixed reliably across every downloader's Mac and macOS version. Unchanged by this result — and the whole episode remains an argument for the Tier-3 Core ML / MLX swap.
+
+### ✅ Decision — dependency migration to a single pixi-managed environment (2026-07-25, LANDED)
+
+**Decided: migrate to one pixi-managed environment. torch comes from conda-forge (OpenBLAS, `BLAS_INFO=open`); the PyPI-only remainder is resolved by uv *inside* pixi; one `pixi.lock` covers both halves.** This resolves the CPU-inference block above: OpenBLAS is the only packaged non-Accelerate torch, and a single env is what makes "tested equals shipped" hold across it. Option 2 (conda-only-for-the-release-build) and bare conda are both rejected, on mechanism, below. Device plumbing stays green and uncommitted until the migration lands and the matrix reproduces.
+
+#### Three findings that decided it (each verified, not assumed)
+
+1. **torch was never a uv-controlled dependency.** It's transitive via sentence-transformers; `pyproject.toml` never names it, and `uv.lock` pinning 2.12.0 is an accident of resolution, not intent. So "migration loses `uv.lock` as the source of truth for torch" is backwards — torch was *uncontrolled the whole time*, and the block exists precisely because an unpinned transitive dep silently picked an Accelerate wheel. Migration gains control that never existed rather than surrendering it.
+2. **Option 2's skew silently disarms the xfail gate.** `test_cpu_cross_encoder_returns_finite_scores` is `xfail(strict=True)` so it fails loudly the moment a working BLAS arrives, forcing the CPU flip. That mechanism assumes tests run where the fix lives. Under option 2, tests run in the uv/Accelerate dev env where CPU is still broken, so the gate keeps xfailing forever in the one environment that runs it — the self-announcing tripwire, built for exactly this class of problem, never announces. Disqualifying on mechanism, not preference.
+3. **Option 2's "keep uv for dev/test" benefit is nearly empty, and its last advantage evaporates.** `addopts = -m 'not slow'` means a plain `pytest` never imports torch; there are only 4 slow tests; there is no CI to port (no `.github/workflows`). The migration cost is an env spec and a README line. And conda-forge torch ships **MPS built and available** (`pytorch 2.13.0 cpu_generic_py314…`, `mps built: True`, `mps available: True`, `BLAS_INFO=open` — despite the `cpu_generic` name), so one conda env is a strict superset, running both the CPU-OpenBLAS ship path *and* the `OASIS_DEVICE=mps` canonical baseline. Option 2's only exclusive selling point (MPS-for-dev) is not exclusive.
+
+#### Why pixi, not bare conda
+
+Two deps can't come from conda-forge, forcing conda-core + PyPI-remainder either way:
+
+- **lancedb** — conda-forge has 0.30.0; the project needs **≥0.30.2**, and that's load-bearing: the VectorIndex-not-thread-local concurrency result was *measured on 0.30.2*, so 0.30.0 would silently invalidate a foundational finding.
+- **ranx** — absent from conda-forge (eval group).
+
+Bare conda handles this only via an `environment.yml` `pip:` section, which is unlocked — re-creating the exact "lockfile isn't the source of truth" problem, now genuinely, because that pip section really is unpinned. **pixi closes it: one `pixi.lock` over both halves, with uv doing the PyPI resolution internally.** The reproducibility story ends up *better* than the start — torch pinned intentionally for the first time, both dependency universes under one lock. (Bare-conda trap noted for the record: conda-forge pytorch ships real `torch-2.13.0.dist-info`, so `uv pip install -e .` into the prefix won't clobber it — but `uv sync` in strict project mode *would* reinstall PyPI torch. pixi avoids the footgun.)
+
+#### ~~Two pixi caveats — explicit unknowns~~ — **both cleared 2026-07-25**
+
+Verified early, before the environment became load-bearing — same discipline as the OpenBLAS freeze spike. Full result in the spike entry below.
+
+1. ~~pixi resolves conda-core + PyPI-remainder into one lock with **lancedb ≥0.30.2** and **ranx** present.~~ **Yes** — one `pixi.lock`, 426 conda + 36 PyPI entries, lancedb 0.34.0 and ranx 0.3.21 through the PyPI half.
+2. ~~the resulting pixi env still **PyInstaller-freezes with OpenBLAS intact**~~ **Yes** — recipe unchanged, no `--add-binary`, frozen binary reports `BLAS_INFO=open` with the bundled dylib proven under `env -i`.
+
+#### Sequencing for the owed matrix re-run — control before comparison
+
+The swap changes more than BLAS: **torch 2.12→2.13, transformers→5.14.1, sentence-transformers→5.6.1, numpy→2.5.1** — four confounds. A straight CPU-OpenBLAS run compared against 0.5602 would attribute any delta to BLAS when it could be a version bump. So, in the new env, **run the MPS matrix first as a control**: if it reproduces ndcg@10 0.5602 / mrr 0.5427 / recall@10 0.6844 exactly, the version stack is neutral and any subsequent CPU delta is BLAS-attributable cleanly; if the MPS control already differs, a version-bump effect is caught before it's misread as OpenBLAS. Same logic as the served-vs-direct control: hold everything constant but the one variable under test.
+
+#### Immediate next step (gates everything downstream)
+
+**The pixi-verification spike** — the two caveats above. It gates the CPU flip, the real `oasis serve` freeze (fastapi/uvicorn + LanceDB Rust libs, plus `freeze_support()`), and therefore the app. Nothing about the migration commits until pixi is proven to resolve both halves under one lock *and* the env freezes clean.
+
+**Status:** device plumbing (`device.py`, wrapper params, `(model_name, device)` cache keys, resolver + 4 slow tests) remains green in the working tree and **uncommitted**, pending the migration landing and the CPU matrix reproducing (or restating, rankings-identical) the canonical numbers.
+
+### ✅ Pixi-verification spike — both caveats cleared, migration is viable (2026-07-25)
+
+**Both gates passed. pixi resolves conda-core + PyPI-remainder into one lock, and the resulting env freezes with OpenBLAS intact using the bare-conda recipe unchanged.** The migration direction is confirmed; nothing was committed and `uv.lock` is untouched. Spike artifacts live in the scratchpad (`pixi-spike/`), disposable by design.
+
+**One machine-level change:** pixi 0.73.0 installed via the official installer, which appended a PATH line to `~/.zshrc`.
+
+#### Part 1 — one lock over both halves ✅
+
+| | resolved | half |
+|---|---|---|
+| python | 3.14.6 | conda-forge |
+| pytorch | 2.13.0 `cpu_generic_py314` — **`BLAS_INFO=open`**, MPS built **and** available | conda-forge |
+| libopenblas | 0.3.33 | conda-forge |
+| numpy | **2.4.6** (see the conflict below) | conda-forge |
+| transformers / sentence-transformers | 5.14.1 / 5.6.1 | conda-forge |
+| **lancedb** | **0.34.0** | **PyPI** |
+| **ranx** | **0.3.21** | **PyPI** |
+
+One `pixi.lock`, **426 conda entries + 36 PyPI entries**. `oasis` installed editable from the real tree (`import oasis` resolves to `/Users/mohamedelrefaei/oasis/src/oasis`), the whole engine imports (13 modules incl. `api.app`, `index.pipeline`, `query.reranker`), and the fast suite is green in the pixi env: **938 passed, 3 deselected, 16.7s**.
+
+**The resolve conflict worth remembering — and pixi caught it rather than papering over it.** First `pixi install` failed hard: `ranx` → `numba>=0.54.1`, and every *released* numba caps `numpy<2.5`, while the conda solve had pinned conda-forge's default `numpy==2.5.1`. Pinning `numpy = ">=2.2,<2.5"` in the conda half resolves it (→ 2.4.6). This is the cross-half constraint propagation working: the conda pin flowed into the uv resolution and produced an error, where bare conda's `pip:` section would have let pip install a second numpy over the conda one and desync it from the torch ABI. **The failure mode pixi was chosen to prevent is the one it demonstrated on the first run.**
+
+**Caveat that came out of it — lancedb resolved to 0.34.0, not 0.30.2.** The constraint was `>=0.30.2` as specified, and PyPI's latest is four minor versions ahead of the version the VectorIndex-not-thread-local concurrency result was *measured* on. That result is foundational (§ Concurrency › LanceDB), so **the search-during-index regression test should be re-run on 0.34.0** before the migration is trusted — or lancedb pinned to `==0.30.2` deliberately. Not a spike failure; a new owed item.
+
+**Bonus, and it is the headline: the self-announcing gate fired.** `pytest -m slow tests/test_device.py` in the pixi env → `[XPASS(strict)] test_cpu_cross_encoder_returns_finite_scores` — a hard failure, by design. The cross-encoder returned **finite CPU logits in the real project code**, not just the reproducer, which is the first proof that OpenBLAS fixes Oasis itself rather than a minimal script. Whoever lands the migration must remove the marker and flip `DEFAULT_DEVICE` in the same change, exactly as the marker's reason text instructs. (Other 2 slow device tests passed.)
+
+#### Part 2 — freeze on the pixi substrate ✅
+
+**The recipe transferred verbatim. No `--add-binary` needed, no pixi-specific adjustment.** pixi's prefix (`.pixi/envs/default/lib`) sits at the same depth relative to `site-packages/torch/` as a conda prefix does, so torch's `LC_RPATH @loader_path/../../../` resolves identically and macholib relocated the chain unchanged: `libopenblas.0.dylib` (13 MB) plus the `lib{blas,cblas,lapack}` symlinks landed in `_internal/`, rpath rewritten to `@loader_path/..`.
+
+| check | result |
+|---|---|
+| Frozen `BLAS_INFO` | **`open`** |
+| Device / scores | `cpu`, `[-11.4411, -11.462, -9.0544]`, **all finite**, whale snippet ranked first |
+| Unfrozen vs frozen | **byte-identical scores** |
+| Provenance under `env -i` | loads **`dist/reproduce/_internal/libopenblas.0.dylib`** — the bundled copy, pixi prefix unreachable |
+| `freeze_support()` | no respawn loop, steady single PID, **zero orphans**, exit 0 |
+
+`multiprocessing.freeze_support()` at `__main__` before importing torch was applied as recorded; the respawn loop never appeared, so the fix carries to pixi unchanged.
+
+**Size: 1.2 G vs the conda spike's 827 M — but the two aren't comparable, and the delta is not pixi's.** The conda spike env held only torch + sentence-transformers + transformers + pyinstaller; this one is the *full project* env. The overage is almost entirely the project's own PyPI half: **llvmlite 123 M** (ranx → numba → llvmlite), **pyarrow 120 M** (lancedb), `libicudata` 32 M, pandas 18 M, matplotlib 13 M. **llvmlite + matplotlib (~136 M) are eval-only and must never enter the shipped bundle** — which is the concrete argument for splitting the promoted manifest into pixi **features/environments** (`default` / `eval` / `build`) rather than one flat env; PyInstaller should freeze the `default` feature only. The duplicated `libtorch_cpu.dylib` (237 M × 2 = 474 M) reproduces exactly as in the conda spike — same known waste, unrelated to pixi.
+
+#### What this does and doesn't settle
+
+**Settled:** pixi is viable end-to-end — one lock over both dependency universes, the project runs and tests green in it, and the freeze boundary preserves OpenBLAS with no recipe change.
+
+**Still open, unchanged by this spike:** the real `oasis serve` freeze (fastapi/uvicorn + **LanceDB Rust libs** — and note pyarrow's 120 M now has to come through it), the MPS-control-then-CPU matrix re-run, offline + weights bundling, and the `.app`/signing layer. **New:** re-run the search-during-index regression on lancedb 0.34.0, or pin to 0.30.2.
+
 ### Recently done (2026-07-25)
+- **Migrated to pixi, flipped inference to CPU (OpenBLAS), re-measured the matrix, re-confirmed lancedb.** One commit, five parts, two of them gates that ran *before* anything committed. This is the end of the CPU-inference block that started with the app's MPS abort.
+  - **`pixi.toml` + `pixi.lock` replace `uv.lock`** as the top-level dependency manager. uv did not leave — pixi uses it internally to resolve the PyPI half; `uv_build` remains the build backend. torch now comes from conda-forge (`pytorch 2.13.0 cpu_generic_py314`, `BLAS_INFO=open`); lancedb and ranx come from PyPI. One lock covers both halves: **426 conda + 36 PyPI entries**.
+  - **Feature-split, and the split is load-bearing.** `default` = runtime only and is the PyInstaller freeze target; `test`/`eval`/`build` carry pytest+httpx+mypy+ruff, ranx+matplotlib, and pyinstaller. Verified by import that **pytest, ranx, matplotlib, PyInstaller, llvmlite and numba are all absent from `default`** — in the flat spike env, eval-only tooling put ~136 MB of llvmlite+matplotlib into the bundle. `default` and `dev` share **one solve-group**, so the numpy/torch that ships is by construction the one the suite and the eval ran against (verified: `numpy 2.4.6` in both).
+  - **numpy is capped `<2.5`, and the cap is the eval feature's fault.** `ranx → numba`, and every released numba requires `numpy<2.5` while conda-forge defaults to 2.5.1. pixi surfaced this as a hard resolve failure on the first `pixi install`; bare conda's unlocked `pip:` section would have let pip install a second numpy over the conda one and desync it from torch's ABI. **The failure mode pixi was chosen to prevent is the one it demonstrated on the first run.**
+  - **Matrix re-measured — GATE, and it moved.** Canonical restated to **ndcg@10 0.5601, mrr 0.5427, recall@10 0.6844, p@5 0.2275, p@10 0.1338** (was 0.5602 / 0.5427 / 0.6844 / 0.2250 / 0.1338). Read as a 2×2 against the old canonical:
+    - **The BLAS/device effect is exactly zero.** The MPS control and the CPU run agree on all five aggregates *and* on all **80 per-query score sets** — 0 differences. OpenBLAS CPU is metric-equivalent to MPS. This was the question the migration existed to answer.
+    - **The whole delta is the version stack** (torch 2.12→2.13, transformers→5.14.1, sentence-transformers 5.5→5.6.1, numpy→2.4.6), and it is **2 of 80 queries reordering inside their top-10**: q046 (p@5 0.4→0.6, ndcg 0.9236→0.9515) and q075 (ndcg 1.0000→0.9639), which nearly cancel. **`recall@10` is identical on every one of the 80 queries** (no document entered or left any result set) and **`mrr` is identical on every one** (no top-1 changed). The p@5 move is exactly one grid step, 1/(80×5).
+    - Each device was reindexed separately so both runs are end-to-end on their own device, making the MPS control directly comparable to the old canonical's configuration. Three independent runs produced the same numbers.
+  - **lancedb re-confirmed on the version actually shipped.** pixi resolves **0.34.0**; the VectorIndex-not-thread-local finding was measured on 0.30.2, four minors back, and it is a *silent* failure mode, so it was re-measured rather than assumed. The regression test passed **10/10**, and all four rows of the original table reproduce: reads during `merge_insert` safe (505 reads, 0 exceptions), shared handle climbed 12→212, a separately-opened handle stayed pinned at 12, `checkout_latest()` recovered it to 212. **0.34.0 kept as a measured decision.**
+  - **`DEFAULT_DEVICE = "cpu"`, and the `xfail(strict=True)` marker is gone** — it fired `XPASS(strict)` the moment the pixi env came up, which is precisely what it was built to do, and it did so against the *real project code* rather than a reproducer. It is now a plain assertion on the realistic shape, kept as the tripwire if a future swap ever reintroduces a PyPI torch. `device.py`'s docstring now records that CPU is only safe *because* torch links OpenBLAS.
+  - **Fixed a pre-existing test-pollution bug found by running the full suite.** `test_cli.py` and `test_cli_edges.py` fake both models but cleared only the *reranker* cache, leaving a `MagicMock` parked in `oasis.index.embeddings._MODEL_CACHE` under `("all-MiniLM-L6-v2", "cpu")` where it outlived the fixture. Harmless until a test that builds a *real* embedder ran later in the same session — which `-m ''` now does, so `test_real_embedder_loads_on_cpu` got handed the mock and failed. Both fixtures now clear both caches. Latent since the device plumbing was written; nothing to do with the flip. **941 passed** (full suite incl. `slow`), ruff clean.
+- **Swift app step 2 — the single-page main window (search wired, controls inert).** The lifecycle gate from step 1 now opens onto the real window: query bar → `/api/search` → a 2-column grid of up to 8 result cards (QuickLook thumbnail + title + highlighted snippet), with the right-hand control rail laid out but **deliberately no-op**. First authenticated call the app makes — this is where step 1's stashed `token` finally gets used.
+  - **New files:** `SearchModels.swift` (mirrors `api/schemas.py` — `SearchResult`, `Segment`, `SearchResponse`, `ErrorResponse`; field names read off the source, not invented), `SearchViewModel.swift` (`@MainActor @Observable`, the `SearchState` machine), `ThumbnailLoader.swift`, `ResultCard.swift`, and a rewritten `ContentView.swift`. One additive line on `ServerController`: a `health` computed property so callers read `documents` off the readiness poll instead of re-fetching.
+  - **Two "nothing" states kept distinct**, which is the whole point of APP_SEAM §6e: `documents` null-or-0 → `.empty` → onboarding pointing at Index New Folder; index has content but the query matched nothing → `.noMatches(query)`; content but no query yet → `.idle`, blank. A wiped index must never render as broken, and it doesn't.
+  - **Request built with `URLComponents` + `queryItems`**, never interpolation — queries carry spaces, punctuation and unicode, and `"?q=\(query)"` breaks on the first `&` or space. Params pinned to `mode=hybrid`, `limit=8`, `raw=true` (the eval-measured best path; the app never asks for an NL parse). Whitespace-only queries are dropped client-side rather than spending a request to be 400'd. Non-2xx is mapped through the `{error:{code,message}}` envelope to a legible sentence.
+  - **In-flight search is cancelled when a new one starts**, so a slow earlier response can't paint over a newer one. Enter-to-submit, not search-as-you-type: each search is a real round trip through torch inference.
+  - **`LazyVGrid` fills row-major, which *is* the required rank order** (left→right, top→bottom), so handing it the server's array unmodified satisfies the ordering for free. Nothing sorts or regroups — the server's order is the rank.
+  - **Thumbnails via `QLThumbnailGenerator`, with `NSWorkspace.icon(forFile:)` as the guaranteed fallback** (unsupported types and indexed-then-deleted files are expected, not exceptional — never an empty box). Cached by path, with an in-flight task map so two cards never race the same generation. QuickLook auto-links on import; no project-setting change this commit.
+  - **The segment wire format is now exercised end-to-end across the language boundary.** Cards fold `[{text, match}]` into an `AttributedString` by appending runs — **no index arithmetic anywhere**, which is exactly why segments were chosen over `{start,end}`: Python indexes by codepoint, Swift by grapheme cluster, `AttributedString` by UTF-16, and any offset would need a conversion sitting precisely where nobody tests. Verified against 8 real results (15 match runs): concatenating `text` in order reproduces each snippet, no empty segments, no adjacent segments sharing a `match` value — the canonical form in `CLAUDE.md` § Snippet format holds on the wire, and a synthetic emoji/ZWJ/CJK/combining-mark snippet folds losslessly.
+  - **The five controls are inert by design** — Index New Folder, Reindex Current Folders, Reset Indexing, Settings, and the Statistics panel are positioned and styled real buttons whose actions are `// TODO: step N` no-ops, so the window is the true shape while the wiring stays scoped to search. The one honest live value is the Statistics panel's document count, free from the health payload; the rest of the panel is stubbed pending `/api/status`.
+  - **Verified live** (built with `xcodebuild`, clean): the gate opens to the main window on ready; **both resting states confirmed from real health payloads** — a fresh DB via `OASIS_DB_PATH` gave `documents=null → .empty`, the real index gave `documents=877 → .idle` (`documents: 0` takes the same branch by construction). The search round trip was verified by decoding **real server responses through the app's own `SearchModels.swift`** (compiled standalone, no duplicated structs): 8 results decode including the snake_case keys, a zero-match query decodes as `results: []` and not an error, the 401 envelope decodes to its `message`, and a null `title` falls back to the filename. **Not verified: the in-window interaction itself** — driving the query bar needs keystroke injection, which macOS refused (`osascript is not allowed to send keystrokes`; Accessibility isn't granted for the terminal). Typing a query and watching the grid is the one thing still to eyeball by hand.
 - **Swift app step 1 — the server lifecycle seam** (first Swift commit; `app/Oasis/Oasis/`). Spawn → handshake → health poll → teardown, and the three-state UI over it (`warming` / `ready` / `failed`). Deliberately nothing else: no search, no action buttons, no menu bar, no floating panel. Implements `docs/APP_SEAM.md` §§1–6; **no tests — verification is running it and watching**, and it was.
   - **New files:** `ServerController.swift` (`@MainActor @Observable`, owns the child), `ServerModels.swift` (`Handshake`, `HealthResponse`), `ContentView.swift` (replaced the template stub), `OasisApp.swift` (+`AppDelegate`), `app/README-dev.md`, `app/.gitignore` (Xcode ignores scoped to `app/` so the root `.gitignore` stays Python; `xcshareddata/` is deliberately **not** ignored — the shared scheme carries `OASIS_SERVE_BIN`).
   - **Spawn by absolute path from `OASIS_SERVE_BIN`, with no `$PATH` fallback.** Not a style choice: this machine has a stale `oasis` on `PATH` predating `serve`, so a fallback would launch the wrong binary and fail confusingly. Unset/non-executable → `.failed` with a message naming the variable. The bundled-binary release path (`Bundle.main`, APP_SEAM §1) is a marked `RELEASE TODO`, not implemented.

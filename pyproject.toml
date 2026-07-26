@@ -49,6 +49,10 @@ eval = [
 ]
 
 [tool.pytest.ini_options]
+# Slow tests are deselected by DEFAULT, which is what keeps the standing
+# hermeticity property true: a plain `pytest` run never imports torch. Run them
+# with `pytest -m slow` (or `pytest -m ''` for everything).
+addopts = "-m 'not slow'"
 markers = [
     "slow: loads real models (PyTorch); deselect with -m 'not slow'",
 ]

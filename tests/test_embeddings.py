@@ -54,15 +54,15 @@ def embedder(fake_model: MagicMock) -> SentenceTransformerEmbedder:
 def test_load_model_returns_sentence_transformer() -> None:
     with patch("oasis.index.embeddings.SentenceTransformer") as MockST:
         MockST.return_value = _fake_model()
-        result = _load_model("all-MiniLM-L6-v2")
+        result = _load_model("all-MiniLM-L6-v2", "cpu")
     assert result is MockST.return_value
 
 
 def test_load_model_same_name_returns_cached_instance() -> None:
     with patch("oasis.index.embeddings.SentenceTransformer") as MockST:
         MockST.return_value = _fake_model()
-        first = _load_model("all-MiniLM-L6-v2")
-        second = _load_model("all-MiniLM-L6-v2")
+        first = _load_model("all-MiniLM-L6-v2", "cpu")
+        second = _load_model("all-MiniLM-L6-v2", "cpu")
     assert first is second
     assert MockST.call_count == 1
 
@@ -70,8 +70,8 @@ def test_load_model_same_name_returns_cached_instance() -> None:
 def test_load_model_different_names_load_separately() -> None:
     with patch("oasis.index.embeddings.SentenceTransformer") as MockST:
         MockST.side_effect = [_fake_model(384), _fake_model(768)]
-        m1 = _load_model("model-a")
-        m2 = _load_model("model-b")
+        m1 = _load_model("model-a", "cpu")
+        m2 = _load_model("model-b", "cpu")
     assert m1 is not m2
     assert MockST.call_count == 2
 
@@ -79,8 +79,8 @@ def test_load_model_different_names_load_separately() -> None:
 def test_load_model_populates_cache() -> None:
     with patch("oasis.index.embeddings.SentenceTransformer") as MockST:
         MockST.return_value = _fake_model()
-        _load_model("all-MiniLM-L6-v2")
-    assert "all-MiniLM-L6-v2" in emb_mod._MODEL_CACHE
+        _load_model("all-MiniLM-L6-v2", "cpu")
+    assert ("all-MiniLM-L6-v2", "cpu") in emb_mod._MODEL_CACHE
 
 
 def test_second_embedder_reuses_cached_model() -> None:
@@ -127,7 +127,7 @@ def test_custom_model_name_forwarded() -> None:
     with patch("oasis.index.embeddings._load_model") as mock_load:
         mock_load.return_value = _fake_model()
         SentenceTransformerEmbedder(model_name="custom-model")
-    mock_load.assert_called_once_with("custom-model")
+    mock_load.assert_called_once_with("custom-model", "cpu")
 
 
 # ---------------------------------------------------------------------------

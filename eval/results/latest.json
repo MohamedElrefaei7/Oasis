@@ -1,13 +1,20 @@
 {
-  "timestamp": "2026-07-14T22:14:20.556019+00:00",
+  "timestamp": "2026-07-26T03:56:48.613021+00:00",
   "git": {
-    "commit": "fc43b68df07e51a734273502acdb3ff64a07c17f",
+    "commit": "6d5637c7be51da5bdfa26fd1b77f6538d4dfada5",
     "dirty": true
   },
   "config": {
+    "mode": "hybrid",
     "rerank": true,
-    "parse": true,
+    "parse": false,
     "llm_used": false,
+    "llm_provider_available": false,
+    "llm_parse_ok": 0,
+    "llm_parse_failed": 83,
+    "llm_model": "llama3.2:3b",
+    "parse_cache_hits": 0,
+    "parse_cache_frozen_failures": 0,
     "today": "2026-07-07",
     "candidate_top_n": 20,
     "final_top_n": 10
@@ -17,11 +24,11 @@
   "num_queries_scored": 80,
   "num_queries_expected_empty": 3,
   "overall": {
-    "precision@5": 0.225,
+    "precision@5": 0.2275,
     "precision@10": 0.1338,
     "recall@10": 0.6844,
     "mrr": 0.5427,
-    "ndcg@10": 0.5602
+    "ndcg@10": 0.5601
   },
   "by_tag": {
     "adversarial": {
@@ -54,7 +61,7 @@
       "precision@10": 0.12,
       "recall@10": 0.8,
       "mrr": 0.8,
-      "ndcg@10": 0.8
+      "ndcg@10": 0.7928
     },
     "cross-format": {
       "n": 4,
@@ -122,11 +129,11 @@
     },
     "folder-filter": {
       "n": 6,
-      "precision@5": 0.2667,
+      "precision@5": 0.3,
       "precision@10": 0.15,
       "recall@10": 0.8333,
       "mrr": 0.7333,
-      "ndcg@10": 0.7162
+      "ndcg@10": 0.7209
     },
     "fts5-syntax": {
       "n": 1,
@@ -226,11 +233,11 @@
     },
     "pdf": {
       "n": 22,
-      "precision@5": 0.2909,
+      "precision@5": 0.3,
       "precision@10": 0.1545,
       "recall@10": 0.8409,
       "mrr": 0.7197,
-      "ndcg@10": 0.7321
+      "ndcg@10": 0.7317
     },
     "pptx": {
       "n": 5,
@@ -336,7 +343,7 @@
       "top_paths": [
         "pdfs/paper-okapi-at-trec3.pdf",
         "xlsx/edge-empty-workbook.xlsx",
-        "md/neovim-readme.md"
+        "pdfs/paper-communication-theory-of-secrecy-systems.pdf"
       ]
     },
     "q078": {
@@ -675,11 +682,11 @@
       "ndcg@10": 0.3869
     },
     "q046": {
-      "precision@5": 0.4,
+      "precision@5": 0.6,
       "precision@10": 0.3,
       "recall@10": 1.0,
       "mrr": 1.0,
-      "ndcg@10": 0.9236
+      "ndcg@10": 0.9515
     },
     "q047": {
       "precision@5": 0.4,
@@ -875,7 +882,7 @@
       "precision@10": 0.2,
       "recall@10": 1.0,
       "mrr": 1.0,
-      "ndcg@10": 1.0
+      "ndcg@10": 0.9639
     },
     "q076": {
       "precision@5": 0.2,

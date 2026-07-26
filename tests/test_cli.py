@@ -7,6 +7,7 @@ import pytest
 from typer.testing import CliRunner
 
 import oasis.cli.app as app_module
+import oasis.index.embeddings as emb_mod
 import oasis.query.reranker as reranker_mod
 from oasis.cli.app import app
 
@@ -45,7 +46,13 @@ def _mock_heavy_deps():
     fake_ce = MagicMock()
     fake_ce.predict.side_effect = lambda pairs, **kw: np.zeros(len(pairs), dtype=np.float32)
 
+    # BOTH caches, because this fixture fakes BOTH models. Clearing only the
+    # reranker's leaves a MagicMock parked in the embeddings cache under
+    # ("all-MiniLM-L6-v2", "cpu"), where it survives the fixture and is handed
+    # to whatever asks next — which a real-model test in the same session then
+    # asserts against and fails on.
     reranker_mod._MODEL_CACHE.clear()
+    emb_mod._MODEL_CACHE.clear()
     with patch("oasis.index.embeddings.SentenceTransformer", return_value=fake_model), \
          patch("oasis.index.vector.lancedb.connect", return_value=mock_db), \
          patch("oasis.index.vector.VectorIndex.doc_ids_with_vectors",
@@ -54,6 +61,7 @@ def _mock_heavy_deps():
          patch("oasis.cli.app.ensure_ollama", return_value=None):
         yield
     reranker_mod._MODEL_CACHE.clear()
+    emb_mod._MODEL_CACHE.clear()
 
 
 def _db(tmp_path: Path) -> Path:

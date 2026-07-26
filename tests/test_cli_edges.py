@@ -9,6 +9,7 @@ import pytest
 from typer.testing import CliRunner
 
 import oasis.cli.app as app_module
+import oasis.index.embeddings as emb_mod
 import oasis.query.reranker as reranker_mod
 from oasis.cli.app import app
 
@@ -51,13 +52,18 @@ def _mock_heavy_deps():
     fake_ce = MagicMock()
     fake_ce.predict.side_effect = lambda pairs, **kw: np.zeros(len(pairs), dtype=np.float32)
 
+    # BOTH caches — see the note in test_cli.py's equivalent fixture. Clearing
+    # only the reranker's leaks a MagicMock into the embeddings cache that
+    # outlives this file.
     reranker_mod._MODEL_CACHE.clear()
+    emb_mod._MODEL_CACHE.clear()
     with patch("oasis.index.embeddings.SentenceTransformer", return_value=fake_model), \
          patch("oasis.index.vector.lancedb.connect", return_value=mock_db), \
          patch("oasis.cli.app.ensure_ollama", return_value=None), \
          patch("oasis.query.reranker.CrossEncoder", return_value=fake_ce):
         yield
     reranker_mod._MODEL_CACHE.clear()
+    emb_mod._MODEL_CACHE.clear()
 
 
 def _db(tmp_path: Path) -> Path:

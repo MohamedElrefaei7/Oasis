@@ -3,7 +3,9 @@
 A natural-language file search tool with hybrid keyword + semantic retrieval.
 
 ## Stack
-- Python 3.14, managed with `uv` (`requires-python = ">=3.14"`, ruff targets `py314` — keep these in sync)
+- Python 3.14, managed with **pixi** (`pixi.toml` + `pixi.lock`; `requires-python = ">=3.14"`, ruff targets `py314` — keep these in sync). `pixi install`, `pixi run -e dev pytest`, `pixi run oasis …`. Two environments: `default` (runtime only — the PyInstaller freeze target) and `dev` (adds the `test`/`eval`/`build` features), sharing one solve-group so versions can't drift between what's tested and what ships.
+- **torch comes from conda-forge, not PyPI, and this is not interchangeable.** Every stock macOS-arm64 wheel links Apple's Accelerate, whose SGEMV path returns all-NaN cross-encoder logits on realistic batch shapes (silently — NaN scores don't raise, and sorting on NaN keys leaves order untouched, so the reranker degrades to no-op with no error). conda-forge links OpenBLAS (`BLAS_INFO=open`). Never move torch to the PyPI half of `pixi.toml`.
+- **Inference runs on CPU by default** (`oasis/device.py`, `OASIS_DEVICE` to override). MPS aborts under Metal validation when `oasis serve` is spawned by a GUI parent, which is unfixable across arbitrary Macs; CPU is portable and, on OpenBLAS, measured metric-identical to MPS.
 - SQLite + FTS5 for keyword index and metadata
 - LanceDB for vector store
 - sentence-transformers (all-MiniLM-L6-v2) for embeddings

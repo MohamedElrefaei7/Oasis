@@ -20,7 +20,7 @@ oasis serve --managed [--port N] [--db PATH]
 ```
 
 - The shipped app spawns the **bundled `oasis` executable directly** (a
-  PyInstaller binary), not `uv run oasis` — no wrapper process between the app
+  PyInstaller binary), not `pixi run oasis` — no wrapper process between the app
   and the server, so stdout carries only what the server writes.
 - **`--managed` arms the parent-death watchdog** (§5). The app always passes it.
 - `--port` omitted (or `0`) → an OS-assigned ephemeral loopback port, so multiple

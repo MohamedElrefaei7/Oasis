@@ -19,18 +19,18 @@ Most built-in OS search indexes shallowly and ranks poorly. `grep` can't help wh
 ```bash
 git clone https://github.com/MohamedElrefaei7/Oasis.git
 cd oasis
-uv sync
+pixi install
 
 # Index a folder (incremental — re-runs skip unchanged files)
-uv run oasis index ~/Documents
+pixi run oasis index ~/Documents
 
 # Search in plain English (examples)
-uv run oasis search "tax pdf from last spring"
-uv run oasis search "powerpoints about machine learning last month"
-uv run oasis search "spreadsheet with quarterly revenue"
+pixi run oasis search "tax pdf from last spring"
+pixi run oasis search "powerpoints about machine learning last month"
+pixi run oasis search "spreadsheet with quarterly revenue"
 
 # Directly open result #2 from the last search
-uv run oasis open 2
+pixi run oasis open 2
 ```
 
 ---
@@ -99,14 +99,15 @@ Every component runs completely locally — embeddings, LLM, and storage. No tel
 
 | Layer | Tool |
 |---|---|
-| Language | Python 3.14+, managed with `uv` |
+| Language | Python 3.14+, managed with `pixi` (conda-forge + PyPI under one lock) |
 | Keyword index | SQLite + FTS5 (BM25, porter stemmer) |
 | Vector index | LanceDB (cosine, embedded) |
 | Embeddings | `sentence-transformers/all-MiniLM-L6-v2` (384-dim) |
 | Reranker | `cross-encoder/ms-marco-MiniLM-L-6-v2` |
 | NL query parsing | Ollama + `instructor` (JSON mode) |
 | CLI | Typer + Rich |
-| Tests | pytest — ~800 tests covering extractors, index, retrieval, parser, CLI |
+| Inference device | CPU by default (torch from conda-forge, OpenBLAS); override with `OASIS_DEVICE` |
+| Tests | pytest — ~940 tests covering extractors, index, retrieval, parser, CLI, HTTP API |
 
 ---
 
