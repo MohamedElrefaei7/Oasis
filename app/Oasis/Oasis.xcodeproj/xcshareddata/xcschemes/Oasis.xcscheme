@@ -54,7 +54,7 @@
       <EnvironmentVariables>
          <EnvironmentVariable
             key = "OASIS_SERVE_BIN"
-            value = "/Users/mohamedelrefaei/oasis/.venv/bin/oasis"
+            value = "/Users/mohamedelrefaei/oasis/.pixi/envs/default/bin/oasis"
             isEnabled = "YES">
          </EnvironmentVariable>
       </EnvironmentVariables>

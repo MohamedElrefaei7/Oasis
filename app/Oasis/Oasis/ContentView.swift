@@ -2,9 +2,8 @@
 //  ContentView.swift
 //  Oasis
 //
-//  Three states over the server lifecycle: warming, ready, failed. No search,
-//  no actions — this view exists so a human watching the window can tell
-//  exactly which state the seam is in and why.
+//  The main window: a lifecycle gate over step 1's server states, and — once
+//  ready — the query bar, the result grid, and the (inert) control rail.
 //
 
 import SwiftUI
@@ -12,16 +11,24 @@ import SwiftUI
 struct ContentView: View {
     let controller: ServerController
 
+    @State private var viewModel: SearchViewModel
+    @FocusState private var queryFocused: Bool
+
+    init(controller: ServerController) {
+        self.controller = controller
+        _viewModel = State(initialValue: SearchViewModel(controller: controller))
+    }
+
     var body: some View {
-        VStack(spacing: 20) {
+        Group {
             switch controller.state {
             case .idle:
-                stateBlock(title: "Starting Oasis…") {
+                lifecycleBlock(title: "Starting Oasis…") {
                     ProgressView().controlSize(.small)
                 }
 
             case .starting:
-                stateBlock(title: "Starting the Oasis server…") {
+                lifecycleBlock(title: "Starting the Oasis server…") {
                     ProgressView().controlSize(.small)
                     Text("Waiting for the handshake.")
                         .foregroundStyle(.secondary)
@@ -30,24 +37,151 @@ struct ContentView: View {
             case .warming(let since):
                 warming(since: since)
 
-            case .ready(let health):
-                ready(health)
-
             case .failed(let message):
                 failed(message)
+
+            // The search UI exists only here. You cannot search a server that
+            // isn't up, so the query field is unreachable — not merely
+            // disabled — until the server reports ready.
+            case .ready(let health):
+                mainWindow(health)
             }
         }
-        .padding(36)
-        .frame(minWidth: 440, minHeight: 260)
+        .frame(minWidth: 940, minHeight: 620)
     }
 
-    // MARK: - States
+    // MARK: - Main window
 
-    /// The long one: measured at 35–54 s (docs/APP_SEAM.md §4). The live
-    /// elapsed counter makes every launch a re-measurement of that window — if
-    /// it routinely runs past what the doc claims, the doc is what's wrong.
+    private func mainWindow(_ health: HealthResponse) -> some View {
+        HStack(alignment: .top, spacing: 20) {
+            VStack(alignment: .leading, spacing: 16) {
+                queryBar
+                resultArea
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            }
+
+            ControlRail(health: health)
+                .frame(width: 260)
+        }
+        .padding(20)
+        .onAppear {
+            // A ready app is immediately typable.
+            queryFocused = true
+            viewModel.refreshRestingState()
+        }
+    }
+
+    private var queryBar: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+
+            TextField("Search your files…", text: $viewModel.query)
+                .textFieldStyle(.plain)
+                .font(.title3)
+                .focused($queryFocused)
+                // Enter to submit, deliberately not search-as-you-type: every
+                // search is a real round trip through torch inference.
+                .onSubmit { viewModel.submit() }
+
+            if !viewModel.query.isEmpty {
+                Button {
+                    viewModel.query = ""
+                    viewModel.submit()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(.quaternary.opacity(0.6), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    // MARK: - Result area
+
+    /// Row-major fill *is* the required ranking — left to right, top to bottom.
+    /// Feeding `LazyVGrid` the server's array in order satisfies it for free,
+    /// so nothing here sorts or regroups: the server's order is the rank.
+    private static let columns = [
+        GridItem(.flexible(), spacing: 16),
+        GridItem(.flexible(), spacing: 16),
+    ]
+
+    @ViewBuilder
+    private var resultArea: some View {
+        switch viewModel.state {
+        case .idle:
+            // Per the sketch: blank until asked. A faint hint, nothing more.
+            centered {
+                Text("Type a query to search your files.")
+                    .foregroundStyle(.tertiary)
+            }
+
+        case .searching:
+            centered {
+                ProgressView().controlSize(.small)
+                Text("Searching…").foregroundStyle(.secondary)
+            }
+
+        case .results(let results):
+            ScrollView {
+                LazyVGrid(columns: Self.columns, spacing: 16) {
+                    ForEach(results) { result in
+                        ResultCard(result: result)
+                    }
+                }
+            }
+
+        case .noMatches(let query):
+            centered {
+                Image(systemName: "magnifyingglass")
+                    .imageScale(.large)
+                    .foregroundStyle(.tertiary)
+                Text("No matches for “\(query)”")
+                    .font(.headline)
+                Text("Try different words, or index more folders.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+
+        // The distinct empty state APP_SEAM.md §6e exists to protect: an index
+        // that is empty (never built, or reset) is onboarding, not a dead grid
+        // and not an error.
+        case .empty:
+            centered {
+                Image(systemName: "tray")
+                    .imageScale(.large)
+                    .foregroundStyle(.tertiary)
+                Text("Nothing indexed yet")
+                    .font(.headline)
+                Text("Index a folder to get started — use **Index New Folder** on the right.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+
+        case .failed(let message):
+            centered {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .imageScale(.large)
+                    .foregroundStyle(.orange)
+                Text(message)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: 420)
+            }
+        }
+    }
+
+    // MARK: - Lifecycle states (step 1)
+
     private func warming(since: Date) -> some View {
-        stateBlock(title: "Warming up…") {
+        lifecycleBlock(title: "Warming up…") {
             ProgressView().controlSize(.small)
             TimelineView(.periodic(from: since, by: 1)) { context in
                 Text("\(Int(context.date.timeIntervalSince(since)))s elapsed")
@@ -65,36 +199,8 @@ struct ContentView: View {
         }
     }
 
-    /// Renders real fields off the health payload, not just "a 200 came back" —
-    /// that is what proves the round trip decoded and reflects server truth.
-    private func ready(_ health: HealthResponse) -> some View {
-        stateBlock(title: "Oasis is ready") {
-            Image(systemName: "checkmark.circle.fill")
-                .imageScale(.large)
-                .foregroundStyle(.green)
-
-            Text(health.indexSummary)
-                .font(.headline)
-
-            if health.reindexRecommended == true {
-                Label("Reindex recommended", systemImage: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.orange)
-            } else {
-                Text("reindex_recommended: false")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-            }
-
-            if let version = health.version {
-                Text("server \(version)")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-            }
-        }
-    }
-
     private func failed(_ message: String) -> some View {
-        stateBlock(title: "Oasis couldn't start") {
+        lifecycleBlock(title: "Oasis couldn't start") {
             Image(systemName: "xmark.octagon.fill")
                 .imageScale(.large)
                 .foregroundStyle(.red)
@@ -106,8 +212,7 @@ struct ContentView: View {
                 .textSelection(.enabled)
                 .frame(maxWidth: 420)
 
-            // Full teardown + respawn, not a resume: the child is terminated
-            // (if it's still alive) and the whole sequence runs from scratch.
+            // Full teardown + respawn, not a resume.
             Button("Retry") { controller.retry() }
                 .keyboardShortcut(.defaultAction)
                 .padding(.top, 4)
@@ -116,20 +221,122 @@ struct ContentView: View {
 
     // MARK: -
 
-    private func stateBlock<Content: View>(
+    private func lifecycleBlock<Content: View>(
         title: String,
         @ViewBuilder content: () -> Content
     ) -> some View {
         VStack(spacing: 12) {
-            Text(title)
-                .font(.title2)
+            Text(title).font(.title2)
             content()
+        }
+        .padding(36)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func centered<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        VStack(spacing: 8) { content() }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+// MARK: - Control rail
+
+/// The sketch's right-hand rail: an action pair on top, the statistics panel in
+/// the middle, a second pair at the bottom.
+///
+/// **Every control here is inert.** They are real, positioned, styled buttons
+/// so the window is the true shape, but their actions are no-ops pending their
+/// own steps — this commit's wiring is scoped to search. The one honest live
+/// value is the document count, read from the health payload the server
+/// controller already holds.
+private struct ControlRail: View {
+    let health: HealthResponse?
+
+    var body: some View {
+        VStack(spacing: 16) {
+            VStack(spacing: 8) {
+                RailButton(title: "Index New Folder", systemImage: "folder.badge.plus") {
+                    // TODO: step 3 — NSOpenPanel, then POST /api/index + SSE progress.
+                }
+                RailButton(title: "Reindex Current Folders", systemImage: "arrow.clockwise") {
+                    // TODO: step 3 — POST /api/index over the known indexed roots.
+                }
+            }
+
+            statisticsPanel
+
+            Spacer(minLength: 0)
+
+            VStack(spacing: 8) {
+                RailButton(title: "Reset Indexing", systemImage: "trash", role: .destructive) {
+                    // TODO: step 4 — confirm, then POST /api/reset {confirm: true}.
+                }
+                RailButton(title: "Settings", systemImage: "gearshape") {
+                    // TODO: step 5 — settings window.
+                }
+            }
+        }
+    }
+
+    private var statisticsPanel: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Indexed File Statistics")
+                .font(.headline)
+
+            Divider()
+
+            // Live and honest — free from the readiness poll.
+            statRow("Documents", value: health?.documents.map(String.init) ?? "None")
+
+            // TODO: step 3 — the rest comes from GET /api/status (db size, last
+            // indexed, indexed roots, stale count). Not fetched this step.
+            statRow("Index size", value: "—")
+            statRow("Last indexed", value: "—")
+            statRow("Folders", value: "—")
+
+            if health?.reindexRecommended == true {
+                Divider()
+                Label("Reindex recommended", systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, minHeight: 190, alignment: .topLeading)
+        .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private func statRow(_ label: String, value: String) -> some View {
+        HStack {
+            Text(label)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            Spacer()
+            Text(value)
+                .font(.callout)
+                .monospacedDigit()
         }
     }
 }
 
+private struct RailButton: View {
+    let title: String
+    let systemImage: String
+    var role: ButtonRole?
+    let action: () -> Void
+
+    var body: some View {
+        Button(role: role, action: action) {
+            Label(title, systemImage: systemImage)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.large)
+    }
+}
+
 #Preview {
-    // Not started — the preview renders `.idle`; a preview must never spawn a
-    // server.
     ContentView(controller: ServerController())
 }

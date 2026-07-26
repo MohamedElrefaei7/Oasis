@@ -37,10 +37,19 @@ final class ServerController {
 
     private(set) var state: State = .idle
 
-    /// Kept from the handshake for later steps — `/api/search` and every other
-    /// protected route need `Authorization: Bearer <token>`. `/api/health`
-    /// deliberately does not (APP_SEAM.md §3), so nothing reads this yet.
+    /// Kept from the handshake: `/api/search` and every other protected route
+    /// need `Authorization: Bearer <token>`. `/api/health` deliberately does
+    /// not (APP_SEAM.md §3), which is why nothing used this until step 2.
     private(set) var handshake: Handshake?
+
+    /// The last health payload, available whenever the server is ready.
+    ///
+    /// Lets callers read real index state (`documents`, `reindex_recommended`)
+    /// without a second fetch — the readiness poll already has it.
+    var health: HealthResponse? {
+        if case .ready(let health) = state { return health }
+        return nil
+    }
 
     // MARK: - Tunables (all justified by APP_SEAM.md §4's measurements)
 
@@ -227,7 +236,11 @@ final class ServerController {
 
                 Point it at the `oasis` binary to run (Product ▸ Scheme ▸ Edit Scheme… \
                 ▸ Run ▸ Arguments ▸ Environment Variables), e.g. \
-                /path/to/oasis/.venv/bin/oasis — see app/README-dev.md.
+                /path/to/oasis/.pixi/envs/default/bin/oasis — see app/README-dev.md.
+
+                It must be the pixi env's binary. A `.venv/bin/oasis` from before \
+                the pixi migration runs Homebrew Python against a PyPI torch, whose \
+                Accelerate BLAS SIGBUSes during model warmup.
                 """)
         }
 
