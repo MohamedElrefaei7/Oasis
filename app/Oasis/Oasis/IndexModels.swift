@@ -91,6 +91,18 @@ struct IndexStats: Codable, Sendable, Equatable {
     var filesSeen: Int {
         indexed + skipped + failed + unsupported + permissionDenied
     }
+
+    /// Key-wise sum, for aggregating a multi-root reindex. Counters are
+    /// per-root totals over disjoint trees, so adding them is the right
+    /// arithmetic — the caveat is nested roots, which would count a shared
+    /// subtree twice (see `IndexViewModel.aggregateStats`).
+    static func sum(_ all: [IndexStats]) -> IndexStats {
+        var merged: [String: Int] = [:]
+        for stats in all {
+            for (key, value) in stats.values { merged[key, default: 0] += value }
+        }
+        return IndexStats(values: merged)
+    }
 }
 
 // MARK: - SSE events

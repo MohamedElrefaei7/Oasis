@@ -67,6 +67,22 @@ final class SearchViewModel {
         Self.log.debug("resting state: \(isEmptyIndex ? "empty (no index content)" : "idle", privacy: .public) — documents=\(documents.map(String.init) ?? "null", privacy: .public)")
     }
 
+    /// The index changed underneath us (an index or reindex finished).
+    ///
+    /// With no query up, this is just the resting-state question again. With one
+    /// up, the results on screen describe the *old* index: reindex's
+    /// reconciliation sweep deletes documents whose files are gone, and a new
+    /// index adds matches, so re-running the query is the only way the grid can
+    /// stay honest. `refreshRestingState()` alone would blank the results, which
+    /// reads as the search having been forgotten.
+    func indexDidChange() {
+        if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            refreshRestingState()
+        } else {
+            submit()
+        }
+    }
+
     // MARK: - Search
 
     /// Enter-to-submit. Not search-as-you-type: each search is a real round trip

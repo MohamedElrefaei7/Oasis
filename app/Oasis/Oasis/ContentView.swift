@@ -13,12 +13,17 @@ struct ContentView: View {
 
     @State private var viewModel: SearchViewModel
     @State private var indexViewModel: IndexViewModel
+    @State private var statusViewModel: StatusViewModel
     @FocusState private var queryFocused: Bool
 
     init(controller: ServerController) {
         self.controller = controller
+        // One `/api/status` reader, shared: it feeds the statistics panel and
+        // the roots Reindex re-scans, and those must never disagree.
+        let status = StatusViewModel(controller: controller)
+        _statusViewModel = State(initialValue: status)
         _viewModel = State(initialValue: SearchViewModel(controller: controller))
-        _indexViewModel = State(initialValue: IndexViewModel(controller: controller))
+        _indexViewModel = State(initialValue: IndexViewModel(controller: controller, status: status))
     }
 
     var body: some View {
@@ -62,9 +67,14 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             }
 
-            ControlRail(health: health) {
-                indexViewModel.chooseFolderAndIndex()
-            }
+            ControlRail(
+                status: statusViewModel,
+                canReindex: !statusViewModel.indexedRoots.isEmpty,
+                indexedRootCount: statusViewModel.indexedRoots.count,
+                noRootsMessage: indexViewModel.noRootsMessage,
+                onIndexNewFolder: { indexViewModel.chooseFolderAndIndex() },
+                onReindex: { indexViewModel.reindexAll() }
+            )
             .frame(width: 260)
         }
         .padding(20)
@@ -72,12 +82,17 @@ struct ContentView: View {
             // A ready app is immediately typable.
             queryFocused = true
             viewModel.refreshRestingState()
+            // Fills the statistics panel, and tells the Reindex button whether
+            // there are roots to re-scan. `IndexViewModel` re-reads the same
+            // model after every operation, so the panel never shows counts from
+            // before the index the user just ran.
+            statusViewModel.refresh()
             // A finished index changes `documents`, so the search area's resting
             // state has to be re-derived: the empty-index onboarding prompt must
             // clear once there's content to search. `IndexViewModel` calls this
             // *after* it has re-fetched health, so the count it reads is fresh.
             indexViewModel.onIndexCompleted = {
-                viewModel.refreshRestingState()
+                viewModel.indexDidChange()
             }
         }
         .sheet(isPresented: $indexViewModel.isPresenting) {
@@ -267,82 +282,60 @@ struct ContentView: View {
 /// The sketch's right-hand rail: an action pair on top, the statistics panel in
 /// the middle, a second pair at the bottom.
 ///
-/// **Index New Folder is live; the rest are still inert.** They are real,
-/// positioned, styled buttons so the window is the true shape, but their actions
-/// are no-ops pending their own steps. The one honest live value is the document
-/// count, read from the health payload the server controller already holds —
-/// and re-read after an index finishes.
+/// **Both index actions and the statistics panel are live; Reset and Settings
+/// are still inert.** Those two are real, positioned, styled buttons so the
+/// window is the true shape, but their actions are no-ops pending their own
+/// steps.
 private struct ControlRail: View {
-    let health: HealthResponse?
+    let status: StatusViewModel
+    /// The index reports at least one root, so there is something to re-scan.
+    let canReindex: Bool
+    let indexedRootCount: Int
+    /// Set when Reindex was asked for and there was nothing to do.
+    let noRootsMessage: String?
     let onIndexNewFolder: () -> Void
+    let onReindex: () -> Void
 
     var body: some View {
         VStack(spacing: 16) {
             VStack(spacing: 8) {
                 RailButton(title: "Index New Folder", systemImage: "folder.badge.plus", action: onIndexNewFolder)
-                RailButton(title: "Reindex Current Folders", systemImage: "arrow.clockwise") {
-                    // TODO: next step — POST /api/index {force: true} over the
-                    // roots from GET /api/status.indexed_roots.
+
+                RailButton(title: "Reindex Current Folders", systemImage: "arrow.clockwise", action: onReindex)
+                    // Nothing to reindex until the index records a root. A
+                    // legacy index (documents but no recorded roots) lands here
+                    // too, and correctly: we can't know what to re-scan.
+                    .disabled(!canReindex)
+                    .help(
+                        canReindex
+                            ? "Re-scan \(indexedRootCount) indexed folder\(indexedRootCount == 1 ? "" : "s") for new, changed and deleted files."
+                            : "No indexed folders yet — use Index New Folder."
+                    )
+
+                if !canReindex || noRootsMessage != nil {
+                    Text(noRootsMessage ?? "No indexed folders yet — use Index New Folder.")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .multilineTextAlignment(.leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
 
-            statisticsPanel
+            StatisticsPanelView(viewModel: status)
 
             Spacer(minLength: 0)
 
             VStack(spacing: 8) {
                 RailButton(title: "Reset Indexing", systemImage: "trash", role: .destructive) {
-                    // TODO: step 4 — confirm, then POST /api/reset {confirm: true}.
+                    // TODO: next step — confirm, then POST /api/reset {confirm: true}.
                 }
                 RailButton(title: "Settings", systemImage: "gearshape") {
-                    // TODO: step 5 — settings window.
+                    // TODO: later step — settings window.
                 }
             }
         }
     }
 
-    private var statisticsPanel: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Indexed File Statistics")
-                .font(.headline)
-
-            Divider()
-
-            // Live and honest — free from the readiness poll.
-            statRow("Documents", value: health?.documents.map(String.init) ?? "None")
-
-            // TODO: the rest comes from GET /api/status (db size, last indexed,
-            // indexed roots, stale count). Not fetched this step — `documents`
-            // is refreshed off /api/health when an index finishes.
-            statRow("Index size", value: "—")
-            statRow("Last indexed", value: "—")
-            statRow("Folders", value: "—")
-
-            if health?.reindexRecommended == true {
-                Divider()
-                Label("Reindex recommended", systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-            }
-
-            Spacer(minLength: 0)
-        }
-        .padding(12)
-        .frame(maxWidth: .infinity, minHeight: 190, alignment: .topLeading)
-        .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 10))
-    }
-
-    private func statRow(_ label: String, value: String) -> some View {
-        HStack {
-            Text(label)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-            Spacer()
-            Text(value)
-                .font(.callout)
-                .monospacedDigit()
-        }
-    }
 }
 
 private struct RailButton: View {

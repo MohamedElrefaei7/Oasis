@@ -2,15 +2,14 @@
 //  IndexViewModel.swift
 //  Oasis
 //
-//  The index flow: folder picker → POST /api/index → the SSE progress stream →
-//  a terminal summary, with cooperative cancel. The first thing in the app that
-//  writes to the index, and the first consumer of the async-index machinery
-//  built server-side (api/index.py, api/jobs.py).
+//  The index flow's state machine, over `IndexRunner` (which owns the POST + SSE
+//  machinery for a single job).
 //
-//  Reads `port`/`token` off the handshake `ServerController` holds — both the
-//  POST and the SSE GET are token-gated (header auth, which `URLSession` can do
-//  and a browser `EventSource` cannot; that's why the server took a header
-//  rather than a query-param token).
+//  **Both rail actions are the same sequence with a different root list**, which
+//  is why there is one view model and not two: Index New Folder is the N = 1
+//  case. The server runs one job at a time and 409s a second, so a multi-root
+//  reindex is inherently sequential — run a root, await its terminal event,
+//  advance. That is the only structural difference between the two operations.
 //
 
 import AppKit
@@ -22,10 +21,68 @@ import OSLog
 @Observable
 final class IndexViewModel {
 
+    // MARK: - Operation
+
+    /// What the user asked for. Both send `force: false` — see `force`.
+    enum Operation {
+        /// One root, chosen through `NSOpenPanel`.
+        case indexFolder(String)
+        /// Every root the index already covers, from `/api/status.indexed_roots`.
+        case reindexAll([String])
+
+        var roots: [String] {
+            switch self {
+            case .indexFolder(let root): [root]
+            case .reindexAll(let roots): roots
+            }
+        }
+
+        /// **Always `false`, including for reindex.**
+        ///
+        /// A `force: false` run still does the *full walk*, which is where all
+        /// of reindex's value is: the reconciliation sweep deletes documents the
+        /// walk no longer sees, and the no-vector backfill embeds docs missing
+        /// vectors. `force` governs only *re-embedding unchanged files* — the
+        /// expensive part, and pure waste unless the embedding model changed.
+        /// The app's embedder is fixed, so it never has. A `force: true` "full
+        /// rebuild" would be the affordance for an embedder-dimension change;
+        /// deliberately not built as a toggle today.
+        var force: Bool { false }
+
+        var isReindex: Bool {
+            switch self {
+            case .indexFolder: false
+            case .reindexAll: true
+            }
+        }
+
+        var verb: String { isReindex ? "Reindexing" : "Indexing" }
+    }
+
+    /// One root's finished contribution to the sequence.
+    struct RootOutcome: Identifiable {
+        enum Result {
+            case completed
+            /// Cancelled — stats are partial, and the sequence stopped here.
+            case cancelled
+            case failed(String)
+        }
+
+        let root: String
+        let result: Result
+        let stats: IndexStats
+
+        var id: String { root }
+
+        var displayName: String { URL(fileURLWithPath: root).lastPathComponent }
+    }
+
     // MARK: - State
 
-    /// The index state machine. Every terminal case is reached by an *event off
-    /// the stream*, never by a local action — see `cancel()`.
+    /// The state of the root currently in flight. Overall position lives in
+    /// `rootIndex` / `operation`, and finished roots in `completed`, so the
+    /// terminal summary can always render what got done regardless of how the
+    /// sequence ended.
     enum State {
         case idle
         /// POSTed, waiting on the 202.
@@ -33,15 +90,16 @@ final class IndexViewModel {
         /// Running. `phase` is the discriminator the progress bar keys off:
         /// `scan` (total unknown → indeterminate) vs `embed` (total known →
         /// determinate) vs `reconciling` (the stale sweep, usually a blink).
-        case indexing(phase: String?, stats: IndexStats, done: Int, total: Int?)
-        case done(IndexStats)
-        /// Partial stats — committed work stays committed.
-        case cancelled(IndexStats)
+        case running(phase: String?, stats: IndexStats, done: Int, total: Int?)
+        case done
+        /// The user cancelled; the sequence stopped rather than advancing.
+        case cancelled
+        /// A root failed; the sequence stopped rather than skipping it.
         case failed(String)
 
         var isRunning: Bool {
             switch self {
-            case .starting, .indexing: true
+            case .starting, .running: true
             case .idle, .done, .cancelled, .failed: false
             }
         }
@@ -49,67 +107,73 @@ final class IndexViewModel {
         var isTerminal: Bool {
             switch self {
             case .done, .cancelled, .failed: true
-            case .idle, .starting, .indexing: false
+            case .idle, .starting, .running: false
             }
         }
     }
 
     private(set) var state: State = .idle
+    private(set) var operation: Operation?
+    /// 0-based position of the root in flight, for "folder N of M".
+    private(set) var rootIndex = 0
+    private(set) var completed: [RootOutcome] = []
 
     /// Cancel is *requested*, not synchronously effected: the pipeline finishes
     /// its current file/batch and emits a terminal `cancelled` event. This flag
     /// is what puts the sheet in "Cancelling…" for that window.
     private(set) var isCancelling = false
 
-    /// The id from the 202. Required by `POST /api/index/cancel`, and used to
-    /// ignore events belonging to some other job.
-    private(set) var jobID: String?
-
-    /// The folder being indexed, for the sheet's subtitle.
-    private(set) var root: URL?
-
     /// Sheet presentation. Settable so `ContentView` can bind to it.
     var isPresenting = false
 
-    /// Called after a successful index, once health has been re-fetched, so the
-    /// search UI can re-derive its resting state (the empty-index onboarding
-    /// prompt has to clear).
+    /// Set when Reindex was asked for but there is nothing to reindex, so the
+    /// rail can say why instead of silently doing nothing.
+    private(set) var noRootsMessage: String?
+
+    /// Called after an operation finishes, once health has been re-fetched, so
+    /// the search UI can re-derive its resting state (the empty-index
+    /// onboarding prompt has to clear, and reindex can empty an index too).
     var onIndexCompleted: (() -> Void)?
+
+    // MARK: - Derived
+
+    var totalRoots: Int { operation?.roots.count ?? 0 }
+
+    /// The root in flight, or the last one touched.
+    var currentRoot: String? {
+        guard let roots = operation?.roots, roots.indices.contains(rootIndex) else { return nil }
+        return roots[rootIndex]
+    }
+
+    /// Whether to show the "folder N of M" line — a one-root reindex is still a
+    /// sequence, but saying "1 of 1" is noise.
+    var showsSequencePosition: Bool { totalRoots > 1 }
+
+    /// Stats summed across every root that finished. Roots are recorded
+    /// separately, so a sum is only meaningful when they don't overlap; nested
+    /// roots (both `/a` and `/a/b` indexed) would double-count. The server
+    /// records roots as given, so that's a real if unlikely case — the per-root
+    /// rows in the summary are what stay exact.
+    var aggregateStats: IndexStats { IndexStats.sum(completed.map(\.stats)) }
 
     // MARK: - Private
 
     private static let log = Logger(subsystem: "com.oasis.app", category: "index")
 
     private let controller: ServerController
-    private var streamTask: Task<Void, Never>?
+    private let runner: IndexRunner
+    /// The app's single `/api/status` reader — the roots Reindex needs and the
+    /// statistics panel's data are the same read, so there is one of it.
+    private let status: StatusViewModel
+    private var sequenceTask: Task<Void, Never>?
 
-    /// Short-lived calls: POST /api/index, POST /api/index/cancel.
-    private let session: URLSession
-    /// The SSE stream. Its request timeout is an *inactivity* timeout, so it
-    /// only has to exceed the server's 15 s heartbeat — the `: ping` comments
-    /// are what keep a quiet-but-live stream from being reaped. A minute is
-    /// four missed heartbeats: dead, not idle.
-    private let streamSession: URLSession
-
-    init(controller: ServerController) {
+    init(controller: ServerController, status: StatusViewModel) {
         self.controller = controller
-
-        let short = URLSessionConfiguration.ephemeral
-        short.timeoutIntervalForRequest = 15
-        short.waitsForConnectivity = false
-        self.session = URLSession(configuration: short)
-
-        let streaming = URLSessionConfiguration.ephemeral
-        streaming.timeoutIntervalForRequest = 60
-        // A first-time index of ~/Documents is minutes; the resource timeout must
-        // not be the thing that ends it. (Default is 7 days — set explicitly so a
-        // future config change can't silently cap a long index.)
-        streaming.timeoutIntervalForResource = 24 * 60 * 60
-        streaming.waitsForConnectivity = false
-        self.streamSession = URLSession(configuration: streaming)
+        self.status = status
+        self.runner = IndexRunner(controller: controller)
     }
 
-    // MARK: - Entry point
+    // MARK: - Entry points
 
     /// Folder picker → index. The chosen URL's path is the `root`.
     func chooseFolderAndIndex() {
@@ -132,357 +196,158 @@ final class IndexViewModel {
             Self.log.debug("folder picker cancelled")
             return
         }
-        start(root: folder)
+        start(.indexFolder(folder.path))
     }
 
-    func start(root folder: URL) {
+    /// Reindex every folder already indexed. **No picker** — the roots come from
+    /// the server, which is the only thing that knows what this index covers.
+    func reindexAll() {
+        guard !state.isRunning else {
+            isPresenting = true
+            return
+        }
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            // Re-read rather than trusting the cached list: the roots the button
+            // was enabled from could be minutes old.
+            await self.status.refreshAndWait()
+            let roots = self.status.indexedRoots
+            guard !roots.isEmpty else {
+                // Covers both "never indexed" and the legacy case: an index with
+                // documents but no recorded roots (pre-root-tracking). The
+                // honest answer is the same — we cannot know what to re-scan,
+                // and guessing a root would aim the reconciliation sweep at a
+                // tree it was never measured against.
+                self.noRootsMessage = "No indexed folders yet — use Index New Folder."
+                Self.log.notice("reindex requested with no recorded roots")
+                return
+            }
+            self.noRootsMessage = nil
+            Self.log.notice("reindexing \(roots.count) root(s)")
+            self.start(.reindexAll(roots))
+        }
+    }
+
+
+    private func start(_ operation: Operation) {
         guard !state.isRunning else { return }
 
-        root = folder
-        jobID = nil
+        self.operation = operation
+        rootIndex = 0
+        completed = []
         isCancelling = false
         state = .starting
         isPresenting = true
 
-        streamTask?.cancel()
-        streamTask = Task { @MainActor [weak self] in
-            await self?.runIndex(root: folder)
+        sequenceTask?.cancel()
+        sequenceTask = Task { @MainActor [weak self] in
+            await self?.runSequence(operation)
         }
     }
 
-    /// Close the sheet after a terminal state. Resets to `.idle` so the next
-    /// index starts clean.
+    /// Close the sheet after a terminal state. Resets so the next run is clean.
     func dismiss() {
         isPresenting = false
         guard state.isTerminal else { return }
         state = .idle
         isCancelling = false
-        jobID = nil
-        root = nil
+        operation = nil
+        rootIndex = 0
+        completed = []
     }
 
-    // MARK: - Kickoff
+    // MARK: - The sequence
 
-    private func runIndex(root folder: URL) async {
-        guard let handshake = controller.handshake else {
-            state = .failed("The server isn't running.")
-            return
-        }
+    /// Run each root in turn. **Sequential by necessity** — the server holds a
+    /// single-job lock and 409s a second POST — and stop-on-trouble by choice:
+    /// a failed or cancelled root ends the operation instead of quietly moving
+    /// on, so the summary can never imply a root was refreshed when it wasn't.
+    private func runSequence(_ operation: Operation) async {
+        for (position, root) in operation.roots.enumerated() {
+            rootIndex = position
+            state = .starting
 
-        guard let url = Self.endpoint(port: handshake.port, path: "/api/index") else {
-            state = .failed("Couldn't build the index URL.")
-            return
-        }
+            let outcome = await runner.run(root: root, force: operation.force) { [weak self] progress in
+                guard let self, !Task.isCancelled else { return }
+                self.state = .running(
+                    phase: progress.phase,
+                    stats: progress.stats,
+                    done: progress.done,
+                    total: progress.total
+                )
+            }
 
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(handshake.token)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.cachePolicy = .reloadIgnoringLocalCacheData
-        do {
-            // A new folder is incremental — `force` is Reindex's job, and it
-            // governs re-embedding, not walking.
-            request.httpBody = try JSONEncoder().encode(IndexRequest(root: folder.path, force: false))
-        } catch {
-            state = .failed("Couldn't encode the index request: \(error.localizedDescription)")
-            return
-        }
+            switch outcome {
+            case .done(let stats):
+                completed.append(RootOutcome(root: root, result: .completed, stats: stats))
 
-        Self.log.notice("POST /api/index root=\(folder.path, privacy: .public) force=false")
+            case .cancelled(let stats):
+                // Cancel stops the *operation*, not just this folder. Committed
+                // work persists, so the partial stats are real and reported.
+                completed.append(RootOutcome(root: root, result: .cancelled, stats: stats))
+                isCancelling = false
+                state = .cancelled
+                await finish()
+                return
 
-        let data: Data
-        let status: Int
-        do {
-            let (body, response) = try await session.data(for: request)
-            data = body
-            status = (response as? HTTPURLResponse)?.statusCode ?? 0
-        } catch {
-            guard !Task.isCancelled else { return }
-            state = .failed("Couldn't reach the server: \(error.localizedDescription)")
-            return
-        }
-        guard !Task.isCancelled else { return }
+            case .failed(let message):
+                completed.append(RootOutcome(root: root, result: .failed(message), stats: .empty))
+                isCancelling = false
+                state = .failed(message)
+                await finish()
+                return
 
-        switch status {
-        case 202:
-            guard let job = try? JSONDecoder().decode(JobResponse.self, from: data) else {
-                state = .failed("The server accepted the index job but sent an unreadable reply.")
+            case .interrupted:
+                // Local teardown, not a server-side event: leave the UI alone
+                // rather than reporting a failure that didn't happen.
+                Self.log.debug("sequence interrupted locally at \(root, privacy: .public)")
                 return
             }
-            jobID = job.jobID
-            state = .indexing(phase: nil, stats: .empty, done: 0, total: nil)
-            Self.log.notice("index job \(job.jobID, privacy: .public) started — connecting to the event stream")
-            await consumeEvents(port: handshake.port, token: handshake.token)
-
-        case 409:
-            // Single-job lock: one is already running. The local `isRunning`
-            // guard stops *this* UI from double-starting; this is the case where
-            // something else did (a stray CLI run, a stale job).
-            let message = Self.errorMessage(from: data) ?? "An index job is already running."
-            Self.log.error("index rejected (409): \(message, privacy: .public)")
-            state = .failed(message)
-
-        case 400:
-            // Shouldn't happen from a picker — the panel only returns
-            // directories — but the endpoint validates and so does this.
-            let message = Self.errorMessage(from: data) ?? "That isn't a directory."
-            Self.log.error("index rejected (400): \(message, privacy: .public)")
-            state = .failed(message)
-
-        default:
-            let message = Self.errorMessage(from: data) ?? "the server returned HTTP \(status)."
-            Self.log.error("index failed (\(status)): \(message, privacy: .public)")
-            state = .failed("Indexing couldn't start — \(message)")
         }
+
+        state = .done
+        await finish()
     }
 
-    // MARK: - The event stream
-
-    /// Consume `GET /api/index/events` until a terminal event settles the state.
-    ///
-    /// One reconnect is allowed. The stream can end without a terminal event —
-    /// the app was backgrounded, the connection dropped — and the snapshot-first
-    /// contract makes recovery exact rather than a guess: a re-connect's first
-    /// event is the job's current (possibly already-terminal) state.
-    private func consumeEvents(port: Int, token: String) async {
-        for attempt in 1...2 {
-            let settled = await streamOnce(port: port, token: token, attempt: attempt)
-            if settled || Task.isCancelled { return }
-            if state.isTerminal { return }
-            Self.log.warning("event stream ended without a terminal event (attempt \(attempt)) — re-attaching")
-            try? await Task.sleep(for: .milliseconds(400))
-            if Task.isCancelled { return }
-        }
-        guard !state.isTerminal else { return }
-        state = .failed(
-            "Lost the progress stream. The index may still be running — reopen Oasis to re-attach."
-        )
-    }
-
-    /// One connection. Returns `true` when a terminal event settled the state.
-    private func streamOnce(port: Int, token: String, attempt: Int) async -> Bool {
-        guard let url = Self.endpoint(port: port, path: "/api/index/events") else {
-            state = .failed("Couldn't build the event-stream URL.")
-            return true
-        }
-
-        var request = URLRequest(url: url)
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-        request.cachePolicy = .reloadIgnoringLocalCacheData
-
-        do {
-            let (bytes, response) = try await streamSession.bytes(for: request)
-            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-            guard status == 200 else {
-                // Drain enough to read the envelope; the body is one small JSON.
-                var body = Data()
-                for try await byte in bytes.prefix(4096) { body.append(byte) }
-                let message = Self.errorMessage(from: body) ?? "the server returned HTTP \(status)."
-                state = .failed("Couldn't follow indexing progress — \(message)")
-                return true
-            }
-
-            var parser = SSEFrameParser()
-            let decoder = JSONDecoder()
-
-            // Byte-wise, not `bytes.lines`: Foundation's line sequence drops
-            // empty lines, and the empty line is what terminates an SSE event.
-            // See `SSEFrameParser` — this is the bug the first run of this flow
-            // hit, and it presents as a stream that simply never delivers.
-            for try await byte in bytes {
-                if Task.isCancelled { return true }
-                // Buffer until a blank line closes the message; `: ping`
-                // heartbeats and `event:` lines never make it past here.
-                guard let payload = parser.consume(byte) else { continue }
-                guard let data = payload.data(using: .utf8) else { continue }
-
-                let event: IndexEvent
-                do {
-                    event = try decoder.decode(IndexEvent.self, from: data)
-                } catch {
-                    // A malformed frame is not worth ending a live index over —
-                    // progress carries absolute counts, so the next tick heals it.
-                    Self.log.error("undecodable index event: \(error.localizedDescription, privacy: .public)")
-                    continue
-                }
-
-                if apply(event) { return true }
-            }
-        } catch is CancellationError {
-            return true
-        } catch let error as URLError where error.code == .cancelled {
-            return true
-        } catch {
-            guard !Task.isCancelled else { return true }
-            Self.log.error("event stream error (attempt \(attempt)): \(error.localizedDescription, privacy: .public)")
-            return false  // let the caller re-attach
-        }
-
-        return false  // stream closed cleanly without a terminal event
-    }
-
-    /// Fold one event into the state machine. Returns `true` when it was terminal.
-    private func apply(_ event: IndexEvent) -> Bool {
-        // Never let another job's events drive this sheet. Same reasoning as
-        // cancel-by-job_id: "whatever is running" is not what we're watching.
-        if let ours = jobID, let theirs = event.jobID, ours != theirs {
-            Self.log.warning("ignoring an event for job \(theirs, privacy: .public) (watching \(ours, privacy: .public))")
-            return false
-        }
-
-        switch event {
-        case .snapshot(let snapshot):
-            // Decoded exactly like a progress update — the first event on
-            // connect is a snapshot, and on a re-attach it may already be
-            // terminal.
-            switch snapshot.status {
-            case "running":
-                state = .indexing(
-                    phase: snapshot.phase,
-                    stats: snapshot.stats,
-                    done: snapshot.done,
-                    total: snapshot.total
-                )
-                return false
-            case "done":
-                settleDone(snapshot.stats)
-                return true
-            case "cancelled":
-                settleCancelled(snapshot.stats)
-                return true
-            case "error":
-                state = .failed(snapshot.error ?? "Indexing failed.")
-                return true
-            default:
-                // "idle" — no job has ever run. Impossible right after our own
-                // 202, so treat it as a lost stream and let the re-attach path
-                // decide, rather than claiming a completion that never happened.
-                Self.log.warning("snapshot reported status \(snapshot.status, privacy: .public)")
-                return false
-            }
-
-        case .progress(let progress):
-            state = .indexing(
-                phase: progress.phase,
-                stats: progress.stats,
-                done: progress.done,
-                total: progress.total
-            )
-            return false
-
-        case .done(let terminal):
-            settleDone(terminal.stats)
-            return true
-
-        case .cancelled(let terminal):
-            settleCancelled(terminal.stats)
-            return true
-
-        case .failed(let failure):
-            Self.log.error("index job failed: \(failure.message, privacy: .public)")
-            state = .failed(failure.message)
-            return true
-
-        case .unknown(let type):
-            Self.log.debug("ignoring unknown event type \(type, privacy: .public)")
-            return false
-        }
-    }
-
-    private func settleDone(_ stats: IndexStats) {
-        isCancelling = false
-        state = .done(stats)
-        Self.log.notice(
-            "index done — indexed=\(stats.indexed) skipped=\(stats.skipped) chunks=\(stats.chunks) removed=\(stats.removed) permission_denied=\(stats.permissionDenied) failed=\(stats.failed) unsupported=\(stats.unsupported)"
-        )
-        // The server's `documents` just changed; the app's held HealthResponse
-        // is now stale. Without this the freshly-indexed folder still shows
-        // "nothing indexed" and the empty state never clears.
-        Task { @MainActor [weak self] in
-            await self?.controller.refreshHealth()
-            self?.onIndexCompleted?()
-        }
-    }
-
-    private func settleCancelled(_ stats: IndexStats) {
-        isCancelling = false
-        state = .cancelled(stats)
-        Self.log.notice(
-            "index cancelled — partial: indexed=\(stats.indexed) chunks=\(stats.chunks) permission_denied=\(stats.permissionDenied)"
-        )
-        // Committed work is real work: a cancelled run still changed the count.
-        Task { @MainActor [weak self] in
-            await self?.controller.refreshHealth()
-            self?.onIndexCompleted?()
-        }
+    /// Everything that has to happen after the sequence settles, whichever way
+    /// it settled.
+    private func finish() async {
+        // The server's `documents` just changed — by additions, and for reindex
+        // also by the reconciliation sweep's deletions. The app's held
+        // HealthResponse is stale until this runs, so the count and the
+        // empty-state would both keep describing the pre-index world.
+        await controller.refreshHealth()
+        // Re-read `/api/status` too: it drives the statistics panel *and* the
+        // Reindex button's roots, both of which the operation just changed —
+        // documents, size, last-indexed, stale count, and (for a new folder) the
+        // root list itself.
+        await status.refreshAndWait()
+        onIndexCompleted?()
     }
 
     // MARK: - Cancel
 
-    /// Request cancellation. **Does not tear anything down.**
+    /// Request cancellation of the running job, and with it the whole sequence.
     ///
-    /// Cancel is cooperative: the pipeline checks the flag between files and
-    /// between embed batches, finishes what it's on, and emits a terminal
-    /// `cancelled` event with partial stats. So this only flips the sheet to
-    /// "Cancelling…" and keeps consuming — the UI settles on the *event*, not on
-    /// the click. Dropping the stream here would throw away the very stats the
-    /// cancel is about to produce.
+    /// The UI settles on the terminal `cancelled` *event*, not on this click:
+    /// the pipeline finishes its current file/batch first and reports partial
+    /// stats. `runSequence` is what declines to advance to the next root.
     func cancel() {
         guard state.isRunning, !isCancelling else { return }
-        guard let jobID, let handshake = controller.handshake else { return }
-
         isCancelling = true
+
         Task { @MainActor [weak self] in
-            await self?.requestCancel(jobID: jobID, handshake: handshake)
-        }
-    }
-
-    private func requestCancel(jobID id: String, handshake: Handshake) async {
-        guard let url = Self.endpoint(port: handshake.port, path: "/api/index/cancel") else { return }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(handshake.token)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try? JSONEncoder().encode(CancelRequest(jobID: id))
-
-        do {
-            let (data, response) = try await session.data(for: request)
-            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-            switch status {
-            case 202:
-                // Requested. Keep consuming; the terminal event settles the UI.
-                Self.log.notice("cancel accepted for job \(id, privacy: .public) — waiting for the terminal event")
-            case 409:
-                // The job already ended — a terminal event is already in flight
-                // or delivered. Nothing to do but let the stream settle.
-                Self.log.notice("cancel 409 for job \(id, privacy: .public) — the job already finished")
-            default:
-                let message = Self.errorMessage(from: data) ?? "the server returned HTTP \(status)."
-                Self.log.error("cancel failed (\(status)): \(message, privacy: .public)")
-                isCancelling = false
+            guard let self else { return }
+            switch await self.runner.requestCancel() {
+            case .requested, .alreadyFinished:
+                // Keep consuming either way — the terminal event settles the UI.
+                break
+            case .failed(let message):
+                Self.log.error("cancel failed: \(message, privacy: .public)")
+                self.isCancelling = false
             }
-        } catch {
-            Self.log.error("cancel request failed: \(error.localizedDescription, privacy: .public)")
-            isCancelling = false
         }
     }
 
-    // MARK: - Helpers
-
-    private static func endpoint(port: Int, path: String) -> URL? {
-        var components = URLComponents()
-        components.scheme = "http"
-        components.host = "127.0.0.1"
-        components.port = port
-        components.path = path
-        return components.url
-    }
-
-    /// Pull `message` out of the `{error: {code, message}}` envelope every
-    /// endpoint uses.
-    private static func errorMessage(from data: Data) -> String? {
-        try? JSONDecoder().decode(ErrorResponse.self, from: data).error.message
-    }
 }
