@@ -130,6 +130,14 @@ final class IndexViewModel {
     /// rail can say why instead of silently doing nothing.
     private(set) var noRootsMessage: String?
 
+    /// Set when a reset was refused, so the rail can say why. Cleared on the
+    /// next attempt and on success.
+    private(set) var resetMessage: String?
+
+    /// True while a reset is in flight — brief (it's a local delete), but long
+    /// enough that the button shouldn't stay pressable.
+    private(set) var isResetting = false
+
     /// Called after an operation finishes, once health has been re-fetched, so
     /// the search UI can re-derive its resting state (the empty-index
     /// onboarding prompt has to clear, and reindex can empty an index too).
@@ -167,10 +175,22 @@ final class IndexViewModel {
     private let status: StatusViewModel
     private var sequenceTask: Task<Void, Never>?
 
+    /// For `POST /api/reset` only. Index jobs and cancel go through the runner,
+    /// which owns its own sessions; reset isn't a job, so it doesn't belong
+    /// there.
+    private let session: URLSession
+
     init(controller: ServerController, status: StatusViewModel) {
         self.controller = controller
         self.status = status
         self.runner = IndexRunner(controller: controller)
+
+        let configuration = URLSessionConfiguration.ephemeral
+        // Reset is a local delete plus a LanceDB table rebuild — fast, but not
+        // instant on a large index.
+        configuration.timeoutIntervalForRequest = 30
+        configuration.waitsForConnectivity = false
+        self.session = URLSession(configuration: configuration)
     }
 
     // MARK: - Entry points
@@ -324,6 +344,81 @@ final class IndexViewModel {
         // root list itself.
         await status.refreshAndWait()
         onIndexCompleted?()
+    }
+
+    // MARK: - Reset
+
+    /// Wipe the index: `POST /api/reset {confirm: true}`.
+    ///
+    /// The caller is responsible for the *human* confirmation — this fires
+    /// immediately. Reset is irreversible, so it must never be reachable
+    /// without a destructive dialog in front of it.
+    func reset() {
+        guard !state.isRunning, !isResetting else { return }
+        isResetting = true
+        resetMessage = nil
+
+        Task { @MainActor [weak self] in
+            await self?.performReset()
+            self?.isResetting = false
+        }
+    }
+
+    private func performReset() async {
+        guard let handshake = controller.handshake,
+              let url = IndexRunner.endpoint(port: handshake.port, path: "/api/reset")
+        else {
+            resetMessage = "The server isn't running."
+            return
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(handshake.token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.httpBody = try? JSONEncoder().encode(ResetRequest(confirm: true))
+
+        Self.log.notice("POST /api/reset")
+
+        do {
+            let (data, response) = try await session.data(for: request)
+            switch (response as? HTTPURLResponse)?.statusCode ?? 0 {
+            case 204:
+                Self.log.notice("index reset — dropping to the empty state")
+                // Exactly the refresh the index flow does: health, status, and
+                // the search area. Reset is the live producer of the
+                // 200-with-0-documents empty state both of those already render.
+                await finish()
+
+            case 409:
+                // Reset takes the same job lock as /api/index. The button is
+                // disabled while a job runs, so this is the defensive path —
+                // a job started from elsewhere, or a race with the disable.
+                let message = IndexRunner.errorMessage(from: data)
+                    ?? "An index is running — cancel or wait before resetting."
+                Self.log.error("reset refused (409): \(message, privacy: .public)")
+                resetMessage = message
+
+            case 404:
+                // No index file to delete. Nothing was destroyed and nothing is
+                // wrong — the app's picture was just ahead of the disk, so
+                // re-read rather than reporting a failure.
+                Self.log.notice("reset 404 — no index existed")
+                await finish()
+
+            case let status:
+                // Includes the 400 the server raises without confirm: true — a
+                // bug on this side if it ever appears, since the flag is always
+                // sent, so it is surfaced rather than swallowed.
+                let message = IndexRunner.errorMessage(from: data) ?? "the server returned HTTP \(status)."
+                Self.log.error("reset failed (\(status)): \(message, privacy: .public)")
+                resetMessage = "Reset failed — \(message)"
+            }
+        } catch {
+            Self.log.error("reset request failed: \(error.localizedDescription, privacy: .public)")
+            resetMessage = "Reset failed — \(error.localizedDescription)"
+        }
     }
 
     // MARK: - Cancel

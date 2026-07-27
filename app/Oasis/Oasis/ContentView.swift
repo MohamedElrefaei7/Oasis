@@ -72,8 +72,11 @@ struct ContentView: View {
                 canReindex: !statusViewModel.indexedRoots.isEmpty,
                 indexedRootCount: statusViewModel.indexedRoots.count,
                 noRootsMessage: indexViewModel.noRootsMessage,
+                isIndexing: indexViewModel.state.isRunning || indexViewModel.isResetting,
+                resetMessage: indexViewModel.resetMessage,
                 onIndexNewFolder: { indexViewModel.chooseFolderAndIndex() },
-                onReindex: { indexViewModel.reindexAll() }
+                onReindex: { indexViewModel.reindexAll() },
+                onReset: { indexViewModel.reset() }
             )
             .frame(width: 260)
         }
@@ -293,8 +296,39 @@ private struct ControlRail: View {
     let indexedRootCount: Int
     /// Set when Reindex was asked for and there was nothing to do.
     let noRootsMessage: String?
+    /// False while an index job runs (reset would 409) — see `canReset`.
+    let isIndexing: Bool
+    /// Set when a reset was refused.
+    let resetMessage: String?
     let onIndexNewFolder: () -> Void
     let onReindex: () -> Void
+    let onReset: () -> Void
+
+    @State private var showingResetConfirm = false
+
+    private var canReset: Bool { status.hasIndexOnDisk && !isIndexing }
+
+    private var resetHelp: String {
+        if isIndexing { return "An index is running — cancel or wait before resetting." }
+        if !status.hasIndexOnDisk { return "There's no index to reset yet." }
+        return "Permanently delete the index and all its search data."
+    }
+
+    /// Names what is destroyed and what it costs. `documentCount` is the live
+    /// number from `/api/status`, so the dialog can't claim a stale figure.
+    private var resetWarning: String {
+        let documents = status.documentCount
+        guard documents > 0 else {
+            // Zero documents but an index on disk — clearing the recorded
+            // folders is still a real, irreversible change.
+            return "This clears the index and the list of indexed folders. This can't be undone."
+        }
+        return """
+            This permanently removes all \(documents.formatted()) indexed \
+            document\(documents == 1 ? "" : "s") and their search data. \
+            You'll need to reindex your folders. This can't be undone.
+            """
+    }
 
     var body: some View {
         VStack(spacing: 16) {
@@ -327,11 +361,40 @@ private struct ControlRail: View {
 
             VStack(spacing: 8) {
                 RailButton(title: "Reset Indexing", systemImage: "trash", role: .destructive) {
-                    // TODO: next step — confirm, then POST /api/reset {confirm: true}.
+                    showingResetConfirm = true
                 }
+                // Two independent reasons to refuse. Reset takes the same job
+                // lock as indexing (the server would 409), and there is nothing
+                // to destroy when no index file exists (it would 404) — so the
+                // button is only live when it would actually succeed.
+                .disabled(!canReset)
+                .help(resetHelp)
+
+                if let resetMessage {
+                    Text(resetMessage)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
                 RailButton(title: "Settings", systemImage: "gearshape") {
                     // TODO: later step — settings window.
                 }
+            }
+            // A real confirmation that names the stakes. Reset is irreversible
+            // and there is no undo, so the dialog says what goes and what it
+            // costs — not a reflexive "Are you sure?". One clear destructive
+            // confirm is enough; it matches the CLI's `--yes`.
+            .confirmationDialog(
+                "Reset the index?",
+                isPresented: $showingResetConfirm,
+                titleVisibility: .visible
+            ) {
+                Button("Reset Index", role: .destructive, action: onReset)
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text(resetWarning)
             }
         }
     }

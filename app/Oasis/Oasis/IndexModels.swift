@@ -47,6 +47,17 @@ struct CancelRequest: Codable, Sendable {
     }
 }
 
+/// Body of `POST /api/reset`.
+///
+/// **The flag is the API's guard, not the user's confirmation** — those are two
+/// separate things and both exist on purpose. There is no interactive prompt
+/// over HTTP (this replaces the CLI's `typer.confirm`), so the server refuses a
+/// bare or empty body with a `400` rather than letting it nuke the index. The
+/// human confirmation is the destructive dialog in the UI.
+struct ResetRequest: Codable, Sendable {
+    let confirm: Bool
+}
+
 // MARK: - Stats
 
 /// The `stats` payload on every event.

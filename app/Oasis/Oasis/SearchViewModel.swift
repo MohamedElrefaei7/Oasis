@@ -165,8 +165,21 @@ final class SearchViewModel {
             if decoded.results.isEmpty {
                 // An empty result set is a valid answer, not an error — and it
                 // is NOT the same as an empty index.
-                Self.log.notice("no matches for \(trimmed, privacy: .public) (\(String(format: "%.1f", decoded.latencyMs), privacy: .public)ms)")
-                state = .noMatches(trimmed)
+                //
+                // **Which of those two it is can't be read off the result set.**
+                // Zero results over an empty index is the onboarding state, not
+                // "your query matched nothing" — telling a user with no index
+                // to "try different words" blames their query for a missing
+                // index (APP_SEAM.md §6e). This is reachable the moment a
+                // search is on screen when the index is emptied: Reset re-runs
+                // the live query, and it came back `[]` against 0 documents.
+                if (controller.health?.documents ?? 0) == 0 {
+                    Self.log.notice("empty result over an empty index — onboarding, not no-matches")
+                    state = .empty
+                } else {
+                    Self.log.notice("no matches for \(trimmed, privacy: .public) (\(String(format: "%.1f", decoded.latencyMs), privacy: .public)ms)")
+                    state = .noMatches(trimmed)
+                }
             } else {
                 Self.log.notice("\(decoded.results.count) results for \(trimmed, privacy: .public) — mode=\(decoded.mode, privacy: .public) llm_parsed=\(decoded.llmParsed) server latency \(String(format: "%.1f", decoded.latencyMs), privacy: .public)ms")
                 state = .results(decoded.results)

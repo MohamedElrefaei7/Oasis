@@ -52,6 +52,19 @@ final class StatusViewModel {
     /// Roots the index covers — what Reindex re-scans, and what the panel lists.
     var indexedRoots: [String] { status?.indexedRoots ?? [] }
 
+    /// Whether an index file exists at all — i.e. whether there is anything for
+    /// Reset to destroy.
+    ///
+    /// This is exactly the line the server draws: a payload of any kind means
+    /// `200`, so `POST /api/reset` would `204`; no payload means the `404`
+    /// branch, where reset has nothing to delete. Note it stays **true** for a
+    /// `200` with zero documents — an index holding no documents can still hold
+    /// a recorded root, and clearing that is a real thing to want.
+    var hasIndexOnDisk: Bool { status != nil }
+
+    /// Documents currently indexed, for the reset dialog's stakes.
+    var documentCount: Int { status?.documents ?? 0 }
+
     private static let log = Logger(subsystem: "com.oasis.app", category: "status")
 
     private let controller: ServerController
