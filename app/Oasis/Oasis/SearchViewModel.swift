@@ -29,8 +29,30 @@ final class SearchViewModel {
         case failed(String)
     }
 
-    var query: String = ""
-    private(set) var state: SearchState = .idle
+    var query: String = "" {
+        didSet {
+            // Editing the query invalidates a highlight that points into the
+            // *previous* answer. Guarded because this fires on every keystroke
+            // and a redundant write to an `@Observable` property invalidates
+            // every view observing it.
+            if selectedIndex != nil { selectedIndex = nil }
+        }
+    }
+
+    private(set) var state: SearchState = .idle {
+        // One place to reset the keyboard highlight, rather than a `nil` next
+        // to every assignment — and there are six. An index into the old result
+        // array is meaningless the instant the array is replaced, and the
+        // out-of-bounds crash it would otherwise cause is exactly the kind of
+        // bug that only shows up when a slow search lands under a fast finger.
+        didSet { selectedIndex = nil }
+    }
+
+    /// Which result the keyboard is on, as an index into `results`.
+    ///
+    /// `nil` means "no highlight" — the resting state, and the state Return
+    /// treats as "run the search" rather than "open something".
+    private(set) var selectedIndex: Int?
 
     /// Sketch max, and what `limit` is pinned to.
     static let resultLimit = 8
@@ -47,6 +69,95 @@ final class SearchViewModel {
         configuration.timeoutIntervalForRequest = 30
         configuration.waitsForConnectivity = false
         self.session = URLSession(configuration: configuration)
+    }
+
+    // MARK: - Keyboard selection
+
+    /// The results currently on screen, or empty in every other state.
+    var results: [SearchResult] {
+        if case .results(let results) = state { return results }
+        return []
+    }
+
+    /// The highlighted result, if any. Bounds-checked rather than trusted:
+    /// `selectedIndex` and `results` are separate properties, and a subscript
+    /// on a stale index is a crash rather than a wrong answer.
+    var selectedResult: SearchResult? {
+        guard let selectedIndex, results.indices.contains(selectedIndex) else { return nil }
+        return results[selectedIndex]
+    }
+
+    enum MoveDirection {
+        case up, down, left, right
+    }
+
+    /// Move the highlight. Returns whether the key press was consumed, so the
+    /// caller can hand an unused arrow back to the text field.
+    ///
+    /// `columns` comes from the view because the grid's shape is the view's
+    /// business — but the arithmetic lives here, in one place, rather than
+    /// being spelled out at four key handlers.
+    ///
+    /// The result grid fills **row-major** (left to right, top to bottom, which
+    /// *is* the ranking), so ← → step by one and ↑ ↓ step by a whole row.
+    @discardableResult
+    func moveSelection(_ direction: MoveDirection, columns: Int) -> Bool {
+        let count = results.count
+        guard count > 0, columns > 0 else { return false }
+
+        guard let current = selectedIndex, results.indices.contains(current) else {
+            // Nothing highlighted yet. ↓ and → enter the results at the top;
+            // ↑ and ← have nowhere to come from, so they stay in the text field
+            // where the caret can use them.
+            switch direction {
+            case .down, .right:
+                selectedIndex = 0
+                return true
+            case .up, .left:
+                return false
+            }
+        }
+
+        let target: Int
+        switch direction {
+        case .up:
+            // Leaving the top row gives the highlight back rather than sticking
+            // to it — ↑ from the first row returns the user to a plain query,
+            // which is the only way out of the grid that doesn't need the mouse.
+            if current < columns {
+                selectedIndex = nil
+                return true
+            }
+            target = current - columns
+        case .down:
+            target = current + columns
+        case .left:
+            target = current - 1
+        case .right:
+            target = current + 1
+        }
+
+        // Clamp, never wrap. Wrapping from the last result back to the first is
+        // disorienting in a grid, and a ↓ that lands on the last row should stay
+        // there rather than teleport to the top.
+        selectedIndex = min(max(target, 0), count - 1)
+        return true
+    }
+
+    /// Point the highlight at a specific result — the click path, so the
+    /// keyboard picks up where the mouse left off.
+    func select(_ index: Int) {
+        guard results.indices.contains(index) else { return }
+        selectedIndex = index
+    }
+
+    /// Returns whether there was anything to clear, so Escape can fall through
+    /// to whatever else Escape might mean when nothing is highlighted.
+    @discardableResult
+    func clearSelection() -> Bool {
+        guard selectedIndex != nil else { return false }
+        selectedIndex = nil
+        return true
     }
 
     // MARK: - Resting state

@@ -17,6 +17,9 @@ struct ContentView: View {
 
     @State private var indexViewModel: IndexViewModel
     @State private var statusViewModel: StatusViewModel
+    /// Window-scoped, unlike the search state: opening a file is something you
+    /// do *to* a result on screen, so it has nothing to outlive the window for.
+    @State private var opener: DocumentOpener
     @FocusState private var queryFocused: Bool
 
     private var controller: ServerController { coordinator.controller }
@@ -33,6 +36,7 @@ struct ContentView: View {
         let status = StatusViewModel(controller: coordinator.controller)
         _statusViewModel = State(initialValue: status)
         _indexViewModel = State(initialValue: IndexViewModel(controller: coordinator.controller, status: status))
+        _opener = State(initialValue: DocumentOpener(controller: coordinator.controller))
     }
 
     var body: some View {
@@ -136,8 +140,48 @@ struct ContentView: View {
                 .font(.title3)
                 .focused($queryFocused)
                 // Enter to submit, deliberately not search-as-you-type: every
-                // search is a real round trip through torch inference.
+                // search is a real round trip through torch inference. Kept as
+                // a backstop below `onKeyPress(.return)`, which handles the
+                // same key and only reaches `submit()` when nothing is
+                // highlighted.
                 .onSubmit { viewModel.submit() }
+                // Keyboard navigation of the results, driven from the text
+                // field rather than by moving focus into the grid.
+                //
+                // **Focus never leaves the query line** — the same model
+                // Spotlight and every browser's address bar use, and the reason
+                // is that the two things a user does here interleave: refine
+                // the query, look at the answers, refine again. Moving real
+                // focus into the grid would mean typing the next query requires
+                // getting focus *back*, and the caret would have to be
+                // re-established every time.
+                //
+                // These handlers attach to the focused field, so they see the
+                // key before the field editor does; returning `.ignored` hands
+                // it back, which is how ← → still move the caret when no result
+                // is highlighted.
+                .onKeyPress(.upArrow) { move(.up) }
+                .onKeyPress(.downArrow) { move(.down) }
+                .onKeyPress(.leftArrow) { move(.left) }
+                .onKeyPress(.rightArrow) { move(.right) }
+                .onKeyPress(.return) {
+                    // The one genuinely ambiguous key: Return means "open the
+                    // highlighted result" when there is one and "run this
+                    // search" when there isn't. Resolved here rather than left
+                    // to `onSubmit`, so exactly one of the two ever fires.
+                    if let selected = viewModel.selectedResult {
+                        opener.open(selected)
+                    } else {
+                        viewModel.submit()
+                    }
+                    return .handled
+                }
+                .onKeyPress(.escape) {
+                    // Escape drops the highlight and leaves the query alone. If
+                    // nothing is highlighted it isn't ours — the user is
+                    // probably reaching for a sheet or the window.
+                    viewModel.clearSelection() ? .handled : .ignored
+                }
 
             if !viewModel.query.isEmpty {
                 Button {
@@ -153,6 +197,14 @@ struct ContentView: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
         .background(.quaternary.opacity(0.6), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    /// Arrow-key handler shared by the four directions.
+    ///
+    /// `.ignored` when the grid didn't take the key, so an arrow with no
+    /// results (or ↑ from the top row) still moves the caret in the field.
+    private func move(_ direction: SearchViewModel.MoveDirection) -> KeyPress.Result {
+        viewModel.moveSelection(direction, columns: Self.columns.count) ? .handled : .ignored
     }
 
     // MARK: - Result area
@@ -182,10 +234,40 @@ struct ContentView: View {
             }
 
         case .results(let results):
-            ScrollView {
-                LazyVGrid(columns: Self.columns, spacing: 16) {
-                    ForEach(results) { result in
-                        ResultCard(result: result)
+            VStack(spacing: 12) {
+                if let failure = opener.failure {
+                    openFailureBanner(failure)
+                }
+
+                // `ScrollViewReader` so the keyboard can reach results that are
+                // scrolled out of view — without it, ↓ past the fold moves an
+                // invisible highlight and the grid looks frozen.
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVGrid(columns: Self.columns, spacing: 16) {
+                            ForEach(Array(results.enumerated()), id: \.element.id) { index, result in
+                                ResultCard(
+                                    result: result,
+                                    isOpening: opener.isOpening(result),
+                                    isSelected: viewModel.selectedIndex == index,
+                                    onOpen: {
+                                        // Clicking moves the highlight too, so
+                                        // the keyboard carries on from wherever
+                                        // the mouse left it rather than jumping
+                                        // back to the top.
+                                        viewModel.select(index)
+                                        opener.open(result)
+                                    }
+                                )
+                                .id(result.id)
+                            }
+                        }
+                    }
+                    .onChange(of: viewModel.selectedIndex) { _, index in
+                        guard let index, results.indices.contains(index) else { return }
+                        withAnimation(.easeOut(duration: 0.15)) {
+                            proxy.scrollTo(results[index].id, anchor: .center)
+                        }
                     }
                 }
             }
@@ -240,6 +322,43 @@ struct ContentView: View {
                     .frame(maxWidth: 420)
             }
         }
+    }
+
+    /// A failed open is reported next to the results, not in a modal.
+    ///
+    /// An alert would demand a click to get back to a grid that is still
+    /// perfectly usable — the other seven results still open fine. The one
+    /// failure worth acting on (410: indexed, since moved) names the fix, and
+    /// the banner stays until it's dismissed or the next open succeeds.
+    private func openFailureBanner(_ failure: DocumentOpener.Failure) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(failure.filename)
+                    .font(.callout.weight(.semibold))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(failure.message)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 0)
+
+            Button {
+                opener.failure = nil
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Dismiss")
+        }
+        .padding(12)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
     }
 
     // MARK: - Lifecycle states (step 1)
