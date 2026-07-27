@@ -60,7 +60,18 @@ final class SearchViewModel {
     /// - `documents > 0` → `.idle`, a blank area waiting for a query.
     ///
     /// Read off the `HealthResponse` step 1's poll already holds — no fetch.
+    ///
+    /// **Only applies when there is no query.** Since step 7 this view model is
+    /// app-level and outlives the window, so `ContentView.onAppear` fires on a
+    /// model that may already hold a query and its results — a window reopened
+    /// by the summon hand-off is exactly that case. Without this guard, opening
+    /// the window would blank the results the hand-off just asked for.
     func refreshRestingState() {
+        guard query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            Self.log.debug("resting state skipped — a query is up")
+            return
+        }
+
         let documents = controller.health?.documents
         let isEmptyIndex = (documents ?? 0) == 0
         state = isEmptyIndex ? .empty : .idle

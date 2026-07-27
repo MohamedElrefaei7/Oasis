@@ -50,6 +50,43 @@ The child's stderr (uvicorn logs, the HuggingFace warning, the
 `Loading weights: 100%` bars) is drained to `os.Logger` under subsystem
 `com.oasis.app`, category `server`, and shows up in the Xcode console.
 
+## The global summon (⌘⌥O)
+
+Step 7 added a Spotlight-style panel on a **global hotkey, default ⌘⌥O**, plus a
+menu-bar item. Two things about it change how you run the app in development:
+
+- **The app no longer quits when you close the window.**
+  `applicationShouldTerminateAfterLastWindowClosed` is `false`, so closing the
+  main window leaves Oasis resident in the menu bar with the hotkey still
+  registered — and the server child still running. That is the point: the
+  summon has to work when no Oasis window is open. **Only Quit (⌘Q, or the
+  menu-bar item) kills the server.** If you close the window and expect the app
+  to be gone, it isn't; check the menu bar.
+- **The binding is rebindable and persisted**, under
+  `KeyboardShortcuts_summonOasis` in `~/Library/Preferences/Administrator.Oasis.plist`.
+  Delete that key to get first-launch behaviour back:
+
+  ```sh
+  defaults delete ~/Library/Preferences/Administrator.Oasis KeyboardShortcuts_summonOasis
+  ```
+
+The app logs the registration outcome once at launch, category `hotkey`:
+
+```
+summon hotkey (keyCode 31 / carbonModifiers 2304) — registered cleanly
+```
+
+**If ⌘⌥O does nothing and the log says it registered cleanly, another app has
+it.** That is not a bug you can detect from inside Oasis:
+`RegisterEventHotKey` does not report other applications' hotkeys — measured,
+two GUI processes registered ⌘⌥O simultaneously and both got `noErr`. The probe
+catches *system* reservations (via `CopySymbolicHotKeys`) and nothing else. The
+fix is to rebind, which is why the shortcut has a default rather than a fixed
+binding.
+
+A registered hotkey is a Carbon `RegisterEventHotKey` and needs **no
+Accessibility permission** — unlike an event tap. Nothing to grant on first run.
+
 ## Verifying teardown
 
 The thing worth checking after every run: **no orphaned `oasis serve` process**.
@@ -62,7 +99,8 @@ Two independent mechanisms keep that true, because neither covers the other's
 case:
 
 - **⌘Q (clean quit)** → `applicationWillTerminate` sends SIGTERM, uvicorn shuts
-  down gracefully.
+  down gracefully. **Closing the window is not this** — see the summon section
+  above; the app stays resident and so does the server.
 - **⌘. (Stop in Xcode)** → Xcode SIGKILLs the app, so
   `applicationWillTerminate` never runs. The child was spawned with `--managed`,
   so its parent-death watchdog notices `getppid() == 1` and exits within ~1 s.

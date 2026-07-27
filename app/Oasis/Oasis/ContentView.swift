@@ -9,21 +9,30 @@
 import SwiftUI
 
 struct ContentView: View {
-    let controller: ServerController
+    /// App-level, not window-level (step 7): it owns the search state the
+    /// summon panel writes into, and it outlives this window.
+    let coordinator: AppSearchCoordinator
 
-    @State private var viewModel: SearchViewModel
+    @Environment(\.openWindow) private var openWindow
+
     @State private var indexViewModel: IndexViewModel
     @State private var statusViewModel: StatusViewModel
     @FocusState private var queryFocused: Bool
 
-    init(controller: ServerController) {
-        self.controller = controller
+    private var controller: ServerController { coordinator.controller }
+    /// The one `SearchViewModel` in the process. Deliberately **not** `@State`:
+    /// window-scoped search state would be recreated (and the panel's query
+    /// lost) every time the window is closed and reopened.
+    private var viewModel: SearchViewModel { coordinator.search }
+
+    init(coordinator: AppSearchCoordinator) {
+        self.coordinator = coordinator
         // One `/api/status` reader, shared: it feeds the statistics panel and
-        // the roots Reindex re-scans, and those must never disagree.
-        let status = StatusViewModel(controller: controller)
+        // the roots Reindex re-scans, and those must never disagree. Both stay
+        // window-scoped — neither is touched by the summon hand-off.
+        let status = StatusViewModel(controller: coordinator.controller)
         _statusViewModel = State(initialValue: status)
-        _viewModel = State(initialValue: SearchViewModel(controller: controller))
-        _indexViewModel = State(initialValue: IndexViewModel(controller: controller, status: status))
+        _indexViewModel = State(initialValue: IndexViewModel(controller: coordinator.controller, status: status))
     }
 
     var body: some View {
@@ -82,9 +91,18 @@ struct ContentView: View {
         }
         .padding(20)
         .onAppear {
+            // The summon hand-off needs a way to reopen this window once it has
+            // been closed, and `openWindow` is only readable from a view.
+            // Registered here as well as on the menu-bar label because this is
+            // the one that runs at launch.
+            coordinator.registerOpenWindow(openWindow)
             // A ready app is immediately typable.
             queryFocused = true
             viewModel.refreshRestingState()
+            // A query typed into the summon panel while the server was still
+            // warming was held rather than refused; this is the first moment it
+            // can actually run. No-op in the common case.
+            coordinator.runPendingQueryIfNeeded()
             // Fills the statistics panel, and tells the Reindex button whether
             // there are roots to re-scan. `IndexViewModel` re-reads the same
             // model after every operation, so the panel never shows counts from
@@ -104,7 +122,12 @@ struct ContentView: View {
     }
 
     private var queryBar: some View {
-        HStack(spacing: 10) {
+        // `@Bindable` rather than `$viewModel`: the model is app-level now, so
+        // there is no `@State` projection to bind through — this is how you get
+        // a binding into an `@Observable` the view doesn't own.
+        @Bindable var viewModel = coordinator.search
+
+        return HStack(spacing: 10) {
             Image(systemName: "magnifyingglass")
                 .foregroundStyle(.secondary)
 
@@ -418,5 +441,5 @@ private struct RailButton: View {
 }
 
 #Preview {
-    ContentView(controller: ServerController())
+    ContentView(coordinator: AppSearchCoordinator(controller: ServerController()))
 }
