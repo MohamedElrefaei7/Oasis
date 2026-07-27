@@ -383,6 +383,47 @@ final class ServerController {
         }
     }
 
+    /// Re-fetch `/api/health` and republish it, after something changed the
+    /// index out from under the poll.
+    ///
+    /// The readiness poll runs exactly once, to `ready`, and then stops — so the
+    /// `HealthResponse` held in `.ready` is a snapshot from *before* the first
+    /// index job. After one completes, `documents` on the server has changed and
+    /// the app's copy hasn't: the empty-state onboarding prompt would keep
+    /// claiming nothing is indexed, over an index that now has content. This
+    /// closes that loop.
+    ///
+    /// No-op unless the server is already `ready` — a refresh must never move
+    /// the lifecycle backwards or resurrect a failed run.
+    func refreshHealth() async {
+        guard case .ready = state, let hs = handshake else { return }
+        let gen = generation
+
+        let url = URL(string: "http://127.0.0.1:\(hs.port)/api/health")!
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 10
+        configuration.waitsForConnectivity = false
+        let session = URLSession(configuration: configuration)
+
+        var request = URLRequest(url: url)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+
+        do {
+            let (data, _) = try await session.data(for: request)
+            guard gen == generation, case .ready = state else { return }
+            let health = try JSONDecoder().decode(HealthResponse.self, from: data)
+            guard health.status == .ready else { return }
+            Self.log.notice(
+                "health refreshed — documents=\(health.documents.map(String.init) ?? "null", privacy: .public)"
+            )
+            state = .ready(health)
+        } catch {
+            // Purely additive: a failed refresh leaves the last good health in
+            // place rather than degrading a working window.
+            Self.log.error("health refresh failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
     // MARK: - Termination and teardown
 
     private func handleTermination(of proc: Process) {

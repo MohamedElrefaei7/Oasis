@@ -12,11 +12,13 @@ struct ContentView: View {
     let controller: ServerController
 
     @State private var viewModel: SearchViewModel
+    @State private var indexViewModel: IndexViewModel
     @FocusState private var queryFocused: Bool
 
     init(controller: ServerController) {
         self.controller = controller
         _viewModel = State(initialValue: SearchViewModel(controller: controller))
+        _indexViewModel = State(initialValue: IndexViewModel(controller: controller))
     }
 
     var body: some View {
@@ -60,14 +62,26 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             }
 
-            ControlRail(health: health)
-                .frame(width: 260)
+            ControlRail(health: health) {
+                indexViewModel.chooseFolderAndIndex()
+            }
+            .frame(width: 260)
         }
         .padding(20)
         .onAppear {
             // A ready app is immediately typable.
             queryFocused = true
             viewModel.refreshRestingState()
+            // A finished index changes `documents`, so the search area's resting
+            // state has to be re-derived: the empty-index onboarding prompt must
+            // clear once there's content to search. `IndexViewModel` calls this
+            // *after* it has re-fetched health, so the count it reads is fresh.
+            indexViewModel.onIndexCompleted = {
+                viewModel.refreshRestingState()
+            }
+        }
+        .sheet(isPresented: $indexViewModel.isPresenting) {
+            IndexProgressView(viewModel: indexViewModel)
         }
     }
 
@@ -157,10 +171,19 @@ struct ContentView: View {
                     .foregroundStyle(.tertiary)
                 Text("Nothing indexed yet")
                     .font(.headline)
-                Text("Index a folder to get started — use **Index New Folder** on the right.")
+                Text("Pick a folder and Oasis will index it — this is the same action as **Index New Folder** on the right.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
+                    .frame(maxWidth: 360)
+                // The onboarding prompt hands off into the identical flow, so
+                // the empty state is a way *out* of itself rather than an
+                // instruction to go look elsewhere.
+                Button("Index a Folder…") {
+                    indexViewModel.chooseFolderAndIndex()
+                }
+                .controlSize(.large)
+                .padding(.top, 4)
             }
 
         case .failed(let message):
@@ -244,22 +267,22 @@ struct ContentView: View {
 /// The sketch's right-hand rail: an action pair on top, the statistics panel in
 /// the middle, a second pair at the bottom.
 ///
-/// **Every control here is inert.** They are real, positioned, styled buttons
-/// so the window is the true shape, but their actions are no-ops pending their
-/// own steps — this commit's wiring is scoped to search. The one honest live
-/// value is the document count, read from the health payload the server
-/// controller already holds.
+/// **Index New Folder is live; the rest are still inert.** They are real,
+/// positioned, styled buttons so the window is the true shape, but their actions
+/// are no-ops pending their own steps. The one honest live value is the document
+/// count, read from the health payload the server controller already holds —
+/// and re-read after an index finishes.
 private struct ControlRail: View {
     let health: HealthResponse?
+    let onIndexNewFolder: () -> Void
 
     var body: some View {
         VStack(spacing: 16) {
             VStack(spacing: 8) {
-                RailButton(title: "Index New Folder", systemImage: "folder.badge.plus") {
-                    // TODO: step 3 — NSOpenPanel, then POST /api/index + SSE progress.
-                }
+                RailButton(title: "Index New Folder", systemImage: "folder.badge.plus", action: onIndexNewFolder)
                 RailButton(title: "Reindex Current Folders", systemImage: "arrow.clockwise") {
-                    // TODO: step 3 — POST /api/index over the known indexed roots.
+                    // TODO: next step — POST /api/index {force: true} over the
+                    // roots from GET /api/status.indexed_roots.
                 }
             }
 
@@ -288,8 +311,9 @@ private struct ControlRail: View {
             // Live and honest — free from the readiness poll.
             statRow("Documents", value: health?.documents.map(String.init) ?? "None")
 
-            // TODO: step 3 — the rest comes from GET /api/status (db size, last
-            // indexed, indexed roots, stale count). Not fetched this step.
+            // TODO: the rest comes from GET /api/status (db size, last indexed,
+            // indexed roots, stale count). Not fetched this step — `documents`
+            // is refreshed off /api/health when an index finishes.
             statRow("Index size", value: "—")
             statRow("Last indexed", value: "—")
             statRow("Folders", value: "—")
