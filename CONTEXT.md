@@ -511,7 +511,7 @@ Env `oasis-blas-test` (conda-forge torch 2.13.0, Python 3.14.6, `BLAS_INFO=open`
 
 - ~~**Pixi-verification spike — gates every item below it.**~~ **Both caveats cleared 2026-07-25** — one lock over both halves, and the frozen pixi env keeps OpenBLAS with the recipe unchanged. See the spike entry below.
 - ~~**Canonical matrix re-run on OpenBLAS CPU**~~ **Done 2026-07-25 — restated to 0.5601, BLAS proven neutral.** The MPS control and the CPU run are identical on all five metrics *and* on all 80 per-query score sets, so the OpenBLAS/device effect is exactly zero; the −0.0001 ndcg@10 / +0.0025 p@5 delta against the old canonical is the version stack, and it is two queries reordering inside their top-10. See Recently done.
-- **Real `oasis serve` freeze** — the minimal reproducer omits fastapi/uvicorn and **LanceDB native (Rust) libs**, a separate bundling risk; plus the `freeze_support()` fix above.
+- ~~**Real `oasis serve` freeze**~~ **GREEN 2026-07-27** — the whole server freezes, launches, handshakes, and serves real hybrid/semantic/keyword search *and* indexes through the frozen binary. LanceDB's Rust `.so` was not the wall; `tiktoken_ext` was. See the spike entry below.
 - **Offline + weights bundling** — spike used the online HF cache; the ship must run `HF_HUB_OFFLINE` with weights inside the bundle.
 - **`.app` wrapper + ad-hoc signing + hardened-runtime-meets-dylibs** — deferred distribution layer.
 
@@ -608,6 +608,85 @@ One `pixi.lock`, **426 conda entries + 36 PyPI entries**. `oasis` installed edit
 **Settled:** pixi is viable end-to-end — one lock over both dependency universes, the project runs and tests green in it, and the freeze boundary preserves OpenBLAS with no recipe change.
 
 **Still open, unchanged by this spike:** the real `oasis serve` freeze (fastapi/uvicorn + **LanceDB Rust libs** — and note pyarrow's 120 M now has to come through it), the MPS-control-then-CPU matrix re-run, offline + weights bundling, and the `.app`/signing layer. **New:** re-run the search-during-index regression on lancedb 0.34.0, or pin to 0.30.2.
+
+### ✅ Real `oasis serve` freeze spike — GREEN (2026-07-27)
+
+**The full server freezes and serves.** A PyInstaller `--onedir` bundle of the real `oasis serve` — fastapi, uvicorn, LanceDB's Rust extension, torch/OpenBLAS, tiktoken, tokenizers, pydantic-core — launches, prints its handshake, reaches `ready`, and returns finite ranked results on all three search modes. It also **indexes**, so the LanceDB write path survived too. This was the gate for the entire distribution arc; the `.app` now has something to embed. Nothing committed except the `build` environment in `pixi.toml`; `spike/` and `dist/` are disposable.
+
+#### The `build` environment (added to the manifest, worth keeping)
+
+`build = { features = ["build"], solve-group = "main" }` — `default` + pyinstaller, nothing else. Verified by import inside it: **ranx, numba, llvmlite, matplotlib, pytest all absent**, and re-verified *after* the freeze by listing `_internal/` — no `llvmlite`, `numba`, `ranx`, `matplotlib`, `pytest`, `mypy`, `ruff`, or `PyInstaller` in the bundle. The feature split predicted in the pixi spike does what it was designed to do: the ~136 MB of eval tooling that contaminated the flat spike env is simply not reachable from this one.
+
+#### The working recipe (exact)
+
+```
+pixi run -e build pyinstaller --onedir --noconfirm --clean \
+  --distpath dist --workpath spike/pybuild --specpath spike \
+  --collect-all torch \
+  --collect-all sentence_transformers \
+  --collect-all transformers \
+  --collect-data tokenizers \
+  --collect-all lancedb \
+  --collect-submodules uvicorn \
+  --collect-submodules oasis \
+  --collect-submodules tiktoken_ext \
+  --hidden-import tiktoken_ext.openai_public \
+  spike/serve_entry.py
+```
+
+**No `--add-binary`. Not for OpenBLAS, and — the surprise — not for LanceDB either.**
+
+#### The predicted wall wasn't the wall
+
+**LanceDB collected cleanly on the first build.** The whole Rust surface is a single `_lancedb.abi3.so` (114 MB) living *inside* the package directory, so `--collect-all lancedb` sweeps it up as an ordinary package binary — there is no out-of-tree `.dylib` for macholib to miss. The Rust-extension rough spot that motivated the spike does not apply to how lancedb ships. `pydantic_core`, `tiktoken`, and `tokenizers` were likewise hook-covered and present without intervention. **uvicorn/fastapi/starlette are pure Python** and rode in the PYZ; `--collect-submodules uvicorn` is retained because uvicorn's protocol/loop/lifespan imports are dynamic and nothing in the run proves the graph would have found them without it.
+
+**The one real failure was `tiktoken_ext`**, and it is a namespace-package problem, not a native one. `chunker.py` calls `tiktoken.get_encoding("cl100k_base")` **at import time**, and tiktoken resolves encodings by scanning `tiktoken_ext` — a namespace package whose members PyInstaller cannot see by following imports, because nothing imports them. First launch died before serving:
+
+```
+ValueError: Unknown encoding cl100k_base.
+Plugins found: []
+```
+
+Fixed by `--collect-submodules tiktoken_ext --hidden-import tiktoken_ext.openai_public`. **This is the headline of the recipe** — the flag whose absence is fatal and whose need is invisible until runtime. Note it fires at *import* of `oasis.cli.app`, so it kills the process before the handshake ever prints: a frozen binary that dies silently with no handshake should be suspected here first.
+
+#### `freeze_support()` behaved exactly as the OpenBLAS spike predicted
+
+`multiprocessing.freeze_support()` runs in `spike/serve_entry.py` at `__main__` **before** importing `oasis.cli.app`. Result: **no respawn loop.** The parent PID held steady across the whole session, with exactly one child — `serve_entry -B -S -I -c from multiprocessing.resource_tracker import main;main(20)`, 46 MB RSS against the parent's 1.19 GB. That is the *diverted* helper, which is the visible proof the fix engaged: without `freeze_support()` that child would be a full re-exec of the app. Watched for 20 s across four samples — both PIDs stable, no churn.
+
+Run **without `--managed`**, deliberately: the launching shell moves on, the process re-parents to PPID 1, and the watchdog would read that as a dead parent and reap a perfectly healthy server. (Confirmed in the run: `ps` shows PPID 1 throughout.)
+
+#### What the searches actually proved
+
+Against a copy of the eval index (300 docs), Bearer token from the handshake, `raw=true`:
+
+| mode | n | scores | what it exercises |
+|---|---|---|---|
+| `hybrid` | 10 | `4.6400 → 3.6326 → …`, **finite, descending** | LanceDB read **+** torch/OpenBLAS CE rerank **+** FTS5, all three at once |
+| `semantic` | 5–10 | `0.4828 → 0.4189 → …` | LanceDB vector read alone |
+| `keyword` | 6–10 | `10.7372 → 10.3432 → …`, snippets on every hit | **SQLite FTS5 is compiled into the frozen interpreter** |
+
+Every result carried a populated snippet with `match: true/false` spans — FTS5 `snippet()` working, which is the implicit test that mattered. Negative CE logits appear where they should (`-5.8877`, `-10.15` for off-topic hits): the score range is real cross-encoder output, not a degenerate constant, and **nothing is NaN** — the Accelerate failure mode is absent inside the bundle, consistent with `libopenblas.0.dylib` (13 MB) sitting in `_internal/` and the chain-rpath relocation from the earlier spike.
+
+#### Bonus — the write path works too (not required for the verdict; it de-risks indexing from the bundle)
+
+`POST /api/index` on a two-file folder through the frozen server: job accepted (`202`, `status: running`), documents **300 → 302**, and both new files came back **ranked first** for their distinctive token within seconds. Critically, one of them also surfaces in a **`mode=semantic`** search — a hit there can only come from the LanceDB vector table, so `merge_insert` genuinely wrote vectors, not just SQLite rows. `/api/status` afterwards: `vectors_built: true`, `semantic_ready: true`, `schema_version: 2`.
+
+#### Cold-start and size — the numbers feeding the distribution story
+
+| measure | value |
+|---|---|
+| launch → handshake | **1.6 s** |
+| launch → `/api/health` `ready` | **8.3 s** (model load inside the bundle; ~21 s on a cold page cache immediately post-build) |
+| first search / warm search | 0.7 s / 0.6 s |
+| **`du -sh dist/serve_entry`** | **1.1 G** |
+
+**1.1 G is the real bundle-size floor for the server**, and it is *not* the pixi spike's 1.2 G minus eval tooling — the eval half (llvmlite 123 M + matplotlib) is gone, but the server dragged pyarrow and the lancedb `.so` in behind it. Largest items: `torch/` 320 M, `libtorch_cpu.dylib` **237 M duplicated** (`_internal/` *and* `_internal/torch/lib/`, 474 M total — the same known PyInstaller waste as both prior spikes, and the single largest recoverable win), `pyarrow` 119 M, `lancedb` 115 M (114 M of it the Rust `.so`), `transformers` 50 M, `scipy` 35 M, `libicudata` 32 M, `sklearn` 16 M. Weights are **not** in this number — the run used the online HF cache, so bundling `all-MiniLM-L6-v2` plus the cross-encoder adds to it.
+
+#### What this settles, and what it doesn't
+
+**Settled:** the real server freezes. Collection is complete for every native dependency the search path touches, the recipe is known and short, and the frozen artifact serves and indexes against a real index. The distribution tunnel is unblocked.
+
+**Explicitly out of scope here and still owed:** the `.app` wrapper, ad-hoc signing and hardened-runtime-meets-dylibs, `HF_HUB_OFFLINE` + weights inside the bundle, and trimming the duplicated `libtorch_cpu.dylib`. Also unchanged: re-run the search-during-index regression on lancedb **0.34.0** (the build env resolved to it, same caveat as the pixi spike).
 
 ### Recently done (2026-07-27, last)
 - **Arrow keys + Return navigate and open the results — the mouse-free path is complete.** ↓ ↑ ← → move a highlight through the grid, Return opens it, Escape drops it. With step 7's summon that makes ⌘⌥O → type → ↓ → Return an end-to-end keyboard path from any app to an open document. `SearchViewModel` owns the selection; `ContentView` binds the keys; `ResultCard` grew a selected state.

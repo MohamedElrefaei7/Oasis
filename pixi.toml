@@ -108,4 +108,5 @@ pyinstaller = "*"
 
 [environments]
 default = { solve-group = "main" }
+build = { features = ["build"], solve-group = "main" }
 dev = { features = ["test", "eval", "build"], solve-group = "main" }
