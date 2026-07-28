@@ -46,10 +46,13 @@ The project is doing well when these hold, and they are the only things that cou
 | Retrieval quality (best config, raw) | Beat the standing best; never silently regress | ndcg@10 **0.5601**, mrr 0.5427, recall@10 0.6844 — restated 2026-07-25 on the pixi/OpenBLAS-CPU stack (was 0.5602; 2 of 80 queries reordered within top-10, see Recently done) |
 | NL parsing layer | Net-positive on the matrix *before* it's default | **−0.108 ndcg@10** — disabled by default |
 | Warm query latency | Establish a p95 budget, then hold it | **not yet measured** — measure via the HTTP service, warm |
-| App startup → ready | Fast enough that models-loading isn't the first impression | **measured 2026-07-17**: `t_handshake` ≈ **2–3.3 s** (spawn→handshake), `t_ready` ≈ **35–54 s** (handshake→`status:ready`, local-load-dominated, high variance). Long enough that the app must poll `/api/health` and never block — see `docs/APP_SEAM.md` |
-| Distribution | One double-click, signed + notarized, zero deps | not started (Tier 1) |
+| App startup → ready (dev spawn) | Fast enough that models-loading isn't the first impression | **measured 2026-07-17**: `t_handshake` ≈ **2–3.3 s** (spawn→handshake), `t_ready` ≈ **35–54 s** (handshake→`status:ready`, local-load-dominated, high variance). Long enough that the app must poll `/api/health` and never block — see `docs/APP_SEAM.md` |
+| **Ship startup → ready** (the one that counts) | The number a stranger actually experiences | **11.63 s measured 2026-07-28** — Finder double-click → `/api/health` `ready`, **cold** (HF + tiktoken + torch caches moved aside), **offline** (Wi-Fi off, `curl` to huggingface.co and openaipublic both fail), weights loaded **from inside the bundle**. 6.85 s on an immediate relaunch. Handshake 1.73 s, warming 4.14 s |
+| Distribution | One double-click, signed + notarized, zero deps | in progress (Tier 1) — self-contained `.app` **done** (server + weights + tiktoken embedded, 1.3 GB); signing, notarization and the DMG still owed |
  
-Warm query latency is still a blank on purpose — it has never been measured and pretending a number exists is exactly the failure the eval discipline exists to prevent. **Startup→ready is now measured** (2026-07-17, via the app-seam spawn harness); it's an order-of-magnitude figure on a dev machine, not yet a p95 budget from the shipped bundle.
+Warm query latency is still a blank on purpose — it has never been measured and pretending a number exists is exactly the failure the eval discipline exists to prevent.
+ 
+**Why there are two startup rows, and why only the second one counts.** The 2026-07-17 figure was measured with a warm HuggingFace cache and a live network, which is the one regime a downloaded app never runs in — it says nothing about a stranger's first launch, and its 35–54 s window in particular was a dev-machine artifact. The 2026-07-28 row is the shipped regime: nothing on the machine but the bundle, and no network to fall back on. It replaced a 35–54 s guess with **4.14 s** of actual model loading. Keep the old row only as the record of what a dev spawn costs.
  
 ### Non-goals (scope boundaries)
  
@@ -90,7 +93,7 @@ Phases 1–5.1 complete: extraction, keyword index, vector index, hybrid retriev
 
 **The app is feature-complete for Phase 6 and the codebase has had a full refactor pass (2026-07-28)** — one search engine shared by the CLI and the server (the CLI's duplicate copy had drifted onto the eval-rejected rerank input), one `OasisAPI` client shared by the six Swift view models, one implementation of the capability derivation that `/api/health` and `/api/status` both promise not to disagree on, and two real over-matching bugs fixed in the folder filter. See "Recently done (2026-07-28)".
 
-**Packaging has started, and the first step is green: the `.app` is self-contained (2026-07-28).** A Release build embeds the frozen server in `Contents/Resources/` and spawns *that* — proven by process path, handshake, ready, index and search from a Finder-launched `Oasis.app` with no pixi environment involved. What that step could **not** settle is the Full Disk Access question: this Mac does not gate `~/Documents` for *any* app (proven with three fresh-identity control bundles), so the clean walk is uninformative and the spawned-server TCC fork stays open. See "The `.app` wrapper" entry; the rest of the arc — weights + offline, the `libtorch_cpu` dedup, deliberate signing, the DMG — is under Up Next › Packaging.
+**Packaging has started, and the app now works on a machine that has never seen it (2026-07-28).** A Release build embeds the frozen server, both models and the tiktoken encoding in `Contents/Resources/`, and spawns the server pointed at them offline. Verified the only way it can be: HF/tiktoken/torch caches moved aside, **Wi-Fi off**, Finder double-click — **11.63 s to ready**, models proven open from inside the bundle by `lsof`, then an index and a search. 1.3 GB total. What that step could **not** settle is the Full Disk Access question: this Mac does not gate `~/Documents` for *any* app (proven with three fresh-identity control bundles), so the clean walk is uninformative and the spawned-server TCC fork stays open. See "The `.app` wrapper" entry; the rest of the arc — weights + offline, the `libtorch_cpu` dedup, deliberate signing, the DMG — is under Up Next › Packaging.
 
 ### Package structure
 
@@ -477,7 +480,7 @@ Landed ahead of the API so `api/` can be written against a stable pipeline:
 - **📦 Packaging and bundling — the next arc, and the ground is now clear.** Deliberately **not** started; recorded here so the state is known when it is.
   - **Unblocked, and what proved it.** The real `oasis serve` freezes (2026-07-27 spike): PyInstaller `--onedir`, the recipe and its one non-obvious flag (`--collect-submodules tiktoken_ext`) recorded in that entry, launching in 1.6 s to handshake / 8.3 s to ready and serving all three modes plus indexing. **1.1 G** is the measured bundle floor for the server, weights excluded.
   - **What the 2026-07-28 pass did for it, concretely.** The tiktoken encoding is lazy, so the frozen binary no longer risks dying before its handshake on a plugin scan, and no entry point does network work at import. `OasisAPI.swift` means the app has **one** place that knows how to reach the server, which is what the dev-path → bundled-binary switch has to edit. The `build` pixi environment (`default` + pyinstaller, eval tooling verifiably absent from the bundle) is in the manifest.
-  - ~~**Still owed, in rough order:** the bundled-binary spawn path~~ **The `.app` wrapper landed 2026-07-28 — see the entry below.** The Release build is self-contained: the frozen server is embedded in `Contents/Resources/`, spawned from there, and a Finder-launched `.app` indexes and searches with no pixi environment anywhere. Still owed after it: weights inside the bundle + `HF_HUB_OFFLINE` (both spikes and the wrapper used the online HF cache); ad-hoc signing done deliberately (the wrapper build gets Xcode's "Sign to Run Locally" for free, which is *not* the same as a considered signing story) and hardened-runtime-meets-dylibs; trimming the duplicated `libtorch_cpu.dylib` (237 M × 2 — the single largest recoverable win, deferred to the signing step because symlinking a dylib interacts with `codesign`); the DMG; and the spawned-server Full Disk Access / TCC question, which the wrapper experiment **could not settle on this machine** — see the verdict below.
+  - ~~**Still owed, in rough order:** the bundled-binary spawn path~~ **The `.app` wrapper landed 2026-07-28 — see the entry below.** The Release build is self-contained: the frozen server is embedded in `Contents/Resources/`, spawned from there, and a Finder-launched `.app` indexes and searches with no pixi environment anywhere. ~~Still owed after it: weights inside the bundle + `HF_HUB_OFFLINE`~~ **also landed 2026-07-28** — both models and the tiktoken encoding are embedded and the bundled spawn runs offline against them, verified on a simulated cold machine (caches moved aside, Wi-Fi off): **11.63 s to ready**, 1.3 GB total. Still owed: ad-hoc signing done deliberately (the wrapper build gets Xcode's "Sign to Run Locally" for free, which is *not* the same as a considered signing story) and hardened-runtime-meets-dylibs; trimming the duplicated `libtorch_cpu.dylib` (237 M × 2 — the single largest recoverable win, deferred to the signing step because symlinking a dylib interacts with `codesign`); the DMG; and the spawned-server Full Disk Access / TCC question, which the wrapper experiment **could not settle on this machine** — see the verdict below.
   - **One unrelated item still open from the spike:** re-run the search-during-index regression on **lancedb 0.34.0**, or pin to 0.30.2. The concurrency result that makes `VectorIndex` a shared handle was measured on 0.30.2.
 - **The real `~/.oasis` index has no embeddings** (built June 3, pre-vector). Re-index to populate `index.lance`. **Detection is now handled** — `/api/health` reports `documents: 877, schema_version: 0, semantic_ready: false, reindex_recommended: true` against it (verified live 2026-07-16), so the app gets a single server-derived boolean to act on instead of doing version math; what's left is the app-side UX for that prompt. **Repair no longer needs `--force` (2026-07-17): the no-vector backfill makes a plain `oasis index` embed unchanged-but-unvectored docs**, so the plain reindex the app will offer actually flips `semantic_ready` true (verified live against a copy of the real index).
 - **🔴 Make the NL filters soft, and stop distilling the embedding query.** The measured headline finding (top of Evaluation): parsing costs −0.108 ndcg@10 / −0.135 recall@10 on hybrid+CE. Two fixes, both small:
@@ -708,6 +711,83 @@ Every result carried a populated snippet with `match: true/false` spans — FTS5
 **Settled:** the real server freezes. Collection is complete for every native dependency the search path touches, the recipe is known and short, and the frozen artifact serves and indexes against a real index. The distribution tunnel is unblocked.
 
 **Explicitly out of scope here and still owed:** the `.app` wrapper, ad-hoc signing and hardened-runtime-meets-dylibs, `HF_HUB_OFFLINE` + weights inside the bundle, and trimming the duplicated `libtorch_cpu.dylib`. Also unchanged: re-run the search-during-index regression on lancedb **0.34.0** (the build env resolved to it, same caveat as the pixi spike).
+
+### ✅ Weights + offline — the bundle works on a cold, disconnected machine (2026-07-28)
+
+**The `.app` no longer depends on this machine's caches or on the network.** With `~/.cache/huggingface`, the tiktoken cache and `~/.cache/torch` all moved aside and **Wi-Fi powered off**, a Finder-launched `Oasis.app` reached ready in **11.63 s**, indexed a folder, and served a search — every model byte read from inside the bundle. That is the number in the North Star table now; every prior startup figure was warm-cache-online and doesn't describe a stranger's first launch.
+
+#### Three artifacts, and the third is the one that hides
+
+| artifact | source | lands in |
+|---|---|---|
+| embedder `all-MiniLM-L6-v2` | `~/.cache/huggingface/hub` | `Resources/models/hub/models--sentence-transformers--all-MiniLM-L6-v2` |
+| reranker `ms-marco-MiniLM-L-6-v2` | same | `Resources/models/hub/models--cross-encoder--ms-marco-MiniLM-L-6-v2` |
+| **tiktoken `cl100k_base`** | `$TMPDIR/data-gym-cache` | `Resources/tiktoken/9b5ad71b…` |
+
+**tiktoken is not covered by `HF_HUB_OFFLINE`** — it is fetched from Microsoft's blob store, not HuggingFace — and the chunker only reaches for it while *indexing*. Miss it and the server starts, warms, reaches ready, and serves searches perfectly, then dies on the first index. **Measured, and this is the whole argument for the network-off test:** in a control run with the HF variables set correctly and `TIKTOKEN_CACHE_DIR` absent, tiktoken **silently downloaded** the encoding and the test passed anyway. A networked test cannot see this bug. (Same failure family as the `tiktoken_ext` freeze death — the artifact that isn't a "model" is the one that gets forgotten twice.)
+
+Its cache filename is the **SHA-1 of the download URL**, so `embed_models.sh` derives it with `shasum` rather than hardcoding an opaque hex constant. Note the source is `$TMPDIR/data-gym-cache` — a per-user `/var/folders/…` path on macOS, *not* `~/.cache`, which is where you would look for it and not find it.
+
+#### Bundled as data, not frozen in
+
+A second build phase (`Scripts/embed_models.sh`, mirroring `embed_server.sh`: Release-only, `rsync -a --delete`, loud preflight failure naming the two commands that populate the caches). **Not `--add-data` into the PyInstaller freeze** — weights can then be updated without re-freezing, and `spike/build.sh` stays untouched.
+
+The HF `hub/` layout is preserved verbatim so load-by-name resolves against it. Its snapshot→blob symlinks are **relative** (`../../blobs/<sha>`), so the tree survives relocation into the bundle — verified after the copy *and* after codesign, and the bundled trees `diff -rq` clean against the source cache.
+
+#### The env vars — measured, not assumed
+
+sentence-transformers **5.6.1** / transformers **5.14.1** / huggingface_hub **1.24.0**. Probed by loading both models with `HOME` pointed at an empty directory, so the real cache was unreachable:
+
+| case | result |
+|---|---|
+| **no cache vars at all** (the control) | **FAIL** — `couldn't connect to huggingface.co … couldn't find them in the cached files`. This is what makes the rest meaningful: the check can fail |
+| `HF_HOME=<res>/models` alone | works — `HF_HUB_CACHE` derives as `$HF_HOME/hub` |
+| `HF_HUB_CACHE=<res>/models/hub` alone | works |
+
+Neither `TRANSFORMERS_CACHE` nor `SENTENCE_TRANSFORMERS_HOME` was needed on these versions. What ships:
+
+```
+HF_HUB_OFFLINE=1
+TRANSFORMERS_OFFLINE=1
+HF_HUB_CACHE      = <Resources>/models/hub    # read-only half → the bundle
+HF_HOME           = ~/.oasis/hf               # writable half  → NOT the bundle
+TIKTOKEN_CACHE_DIR= <Resources>/tiktoken
+```
+
+**`HF_HOME` and `HF_HUB_CACHE` are split on purpose.** Either alone resolves the models, but `HF_HOME` is also where the hub writes tokens, locks and its xet store — and **a write inside a signed bundle breaks its seal**, with signing as the very next step. So the read-only half points into the `.app` and the writable half sits next to the index. Verified: after a full cold run, `~/.oasis/hf` exists and is **empty** (nothing needed writing) and the bundle's model tree is byte-identical to before.
+
+Set **only on the bundled spawn**. The dev path stays bare — it wants the machine's cache and the network — which is why `BinaryResolution` now carries a `ServerSource` instead of just a URL.
+
+#### The cold-machine run
+
+Scripted end-to-end with an EXIT trap plus an independent watchdog, so a failure anywhere could not leave the machine offline or without its caches.
+
+| step | result |
+|---|---|
+| caches moved aside | `~/.cache/huggingface`, `$TMPDIR/data-gym-cache`, `~/.cache/torch`, `~/.oasis/hf` — all confirmed **gone** |
+| network | Wi-Fi **Off**, no IPv4; `curl` to huggingface.co **and** openaipublic.blob.core.windows.net both return `000` |
+| launch | Finder double-click, `spawned [bundled] …/Oasis.app/Contents/Resources/serve_entry/serve_entry` |
+| **launch → ready** | **11.63 s** (handshake 1.73 s, warming 4.14 s); **6.85 s** on relaunch |
+| weights provenance | `lsof` on the server caught both 90 MB `.safetensors` blobs open **from `Oasis.app/Contents/Resources/models/hub/…`** — direct proof, not inference |
+| index (the tiktoken path) | `indexed=2 chunks=2 failed=0` — the chunker resolved `cl100k_base` from the bundle |
+| search | 8 results, 647 ms, both probe files ranked **1st and 2nd** |
+| leak check | none of the three caches recreated; **0** files written into the bundle |
+| teardown | no orphaned `serve_entry` |
+
+#### Size
+
+| | |
+|---|---|
+| server (`serve_entry/`) | 1.1 G |
+| models | 175 M |
+| tiktoken | 1.6 M |
+| **total `.app`** | **1.3 G** on disk (1.36 GB apparent, 7 799 files) |
+
+**+177 MB for the weights.** The compressed download figure belongs to the DMG step; 1.3 G is the honest on-disk number, and the duplicated `libtorch_cpu.dylib` (237 M × 2) is still the single largest recoverable win.
+
+#### Still owed after this
+
+Ad-hoc signing done deliberately, the `libtorch_cpu` dedup, the DMG — and the FDA question, still open and still needing a valid test bed. This step does *make* one: the cold-machine harness (move caches aside, cut the network, launch, assert) is the same shape the FDA test needs, and the "prove the test can fail first" discipline is exactly what the FDA run was missing.
 
 ### ✅ The `.app` wrapper — self-contained bundle GREEN, FDA verdict INCONCLUSIVE (2026-07-28)
 

@@ -81,6 +81,11 @@ final class ServerController {
     /// `_internal/`.
     private static let bundledServerPath = "serve_entry/serve_entry"
 
+    /// Where `Scripts/embed_models.sh` puts the weights and the tiktoken
+    /// encoding, relative to `Contents/Resources/`.
+    private static let bundledHubPath = "models/hub"
+    private static let bundledTiktokenPath = "tiktoken"
+
     private static let log = Logger(subsystem: "com.oasis.app", category: "server")
 
     // MARK: - Private state
@@ -95,8 +100,16 @@ final class ServerController {
         case failed(String)
     }
 
+    /// Which of the two servers got resolved. It decides the child's
+    /// environment, not just a log string: the bundled server is pointed at the
+    /// bundle's weights and told to stay offline, the dev one is left bare.
+    private enum ServerSource: String {
+        case bundled
+        case dev
+    }
+
     private enum BinaryResolution {
-        case found(URL)
+        case found(URL, ServerSource)
         case missing(String)
     }
     private var handshakeGate: CheckedContinuation<HandshakeOutcome, Never>?
@@ -155,9 +168,11 @@ final class ServerController {
     private func run(generation gen: Int) async {
         // 1. Resolve the binary. Absolute path only — never $PATH.
         let binary: URL
+        let source: ServerSource
         switch Self.resolveServerBinary() {
-        case .found(let url):
+        case .found(let url, let resolved):
             binary = url
+            source = resolved
         case .missing(let message):
             fail(message, generation: gen)
             return
@@ -171,16 +186,7 @@ final class ServerController {
         // `--managed` arms the server's parent-death watchdog (APP_SEAM.md §5).
         // It is load-bearing for teardown — see `terminateChild()`.
         child.arguments = ["serve", "--managed"]
-        // `child.environment` is deliberately left alone: inherit, stage nothing.
-        //
-        // The frozen server is self-contained — PyInstaller relocated every
-        // dylib via rpath into `_internal/`, and the spike ran it under `env -i`
-        // — so it needs no pixi activation, no `CONDA_PREFIX`, and no
-        // library-path staging. That independence is the entire payoff of
-        // freezing, and the reason this line is a comment instead of code: the
-        // pixi binary it replaces needed an activated environment, which is what
-        // bit the spawn repeatedly. Inheriting still hands over `HOME`, which is
-        // how the server finds `~/.oasis/index.db` and the model cache.
+        child.environment = Self.childEnvironment(for: source)
         child.standardOutput = stdoutPipe
         child.standardError = stderrPipe
         child.terminationHandler = { [weak self] proc in
@@ -200,9 +206,8 @@ final class ServerController {
         // bundle's frozen server or a dev machine's pixi one — is the first
         // thing to check when a Release build misbehaves, and os_log redacts
         // interpolated strings by default.
-        let source = Self.bundledServerBinary() == nil ? "dev/\(Self.binaryEnvVar)" : "bundled"
         Self.log.notice(
-            "spawned [\(source, privacy: .public)] \(binary.path, privacy: .public) serve --managed (pid \(child.processIdentifier))"
+            "spawned [\(source.rawValue, privacy: .public)] \(binary.path, privacy: .public) serve --managed (pid \(child.processIdentifier))"
         )
 
         // 3. Drain BOTH pipes, continuously.
@@ -261,7 +266,7 @@ final class ServerController {
     private static func resolveServerBinary() -> BinaryResolution {
         // 1. The frozen server inside the bundle (APP_SEAM.md §1).
         if let bundled = bundledServerBinary() {
-            return .found(bundled)
+            return .found(bundled, .bundled)
         }
 
         // 2. Dev: whatever the scheme points at.
@@ -290,7 +295,74 @@ final class ServerController {
         guard FileManager.default.isExecutableFile(atPath: url.path) else {
             return .missing("\(binaryEnvVar) points at \(url.path), which doesn't exist or isn't executable.")
         }
-        return .found(url)
+        return .found(url, .dev)
+    }
+
+    // MARK: - The child's environment
+
+    /// What the spawned server runs with.
+    ///
+    /// **Dev: nothing is staged.** The frozen server is self-contained —
+    /// PyInstaller relocated every dylib via rpath into `_internal/`, and the
+    /// spike ran it under `env -i` — so it needs no pixi activation, no
+    /// `CONDA_PREFIX`, and no library-path staging. That independence is the
+    /// payoff of freezing, and it is what the pixi binary never had; needing an
+    /// activated environment is the thing that bit this spawn repeatedly. A dev
+    /// run also *wants* the machine's HF cache and the network, so it inherits
+    /// and nothing more.
+    ///
+    /// **Bundled: pointed at the bundle, and told to stay offline.** Otherwise
+    /// the shipped app works here and fails on a stranger's Mac, where there is
+    /// no cache to fall back to. The variables below are the ones measured to
+    /// work against sentence-transformers 5.6.1 / transformers 5.14.1 /
+    /// huggingface_hub 1.24.0 — verified by loading both models from a
+    /// relocated cache with `HOME` pointed at an empty directory, and with a
+    /// no-variables control that *failed*, so the check could actually fail.
+    private static func childEnvironment(for source: ServerSource) -> [String: String]? {
+        guard source == .bundled, let resources = Bundle.main.resourceURL else { return nil }
+
+        var env = ProcessInfo.processInfo.environment
+
+        // No network reach. `HF_HUB_OFFLINE` alone is the one that matters for
+        // resolution; `TRANSFORMERS_OFFLINE` is set alongside it because
+        // transformers still reads its own flag on some paths and disagreeing
+        // halves would be worse than either setting.
+        env["HF_HUB_OFFLINE"] = "1"
+        env["TRANSFORMERS_OFFLINE"] = "1"
+
+        // `HF_HUB_CACHE`, not `HF_HOME`, is what points at the weights.
+        //
+        // Both work — measured — because `HF_HUB_CACHE` defaults to
+        // `$HF_HOME/hub`. They are split deliberately: `HF_HOME` is also where
+        // the hub writes tokens, locks and its xet store, and those writes must
+        // not land inside the `.app`. A write into a signed bundle breaks its
+        // seal, and signing is the next step. So the *read-only* half points
+        // into the bundle and the *writable* half points at the app's own data
+        // directory, next to the index.
+        env["HF_HUB_CACHE"] = resources.appendingPathComponent(bundledHubPath).path
+        env["HF_HOME"] = writableHFHome().path
+
+        // **The one that hides.** tiktoken is not a HuggingFace artifact — it
+        // is fetched from Microsoft's blob store — so no `HF_*` variable covers
+        // it, and the chunker only reaches for it while *indexing*. Without
+        // this the server starts, warms, and serves searches perfectly, then
+        // fails on the first index. Measured: with the HF variables correct and
+        // this one absent, tiktoken silently downloaded the encoding and the
+        // test passed anyway. Only a network-off run catches it.
+        env["TIKTOKEN_CACHE_DIR"] = resources.appendingPathComponent(bundledTiktokenPath).path
+
+        return env
+    }
+
+    /// A writable `HF_HOME`, kept out of the bundle. Alongside the index, which
+    /// is the app's existing on-disk footprint.
+    private static func writableHFHome() -> URL {
+        let url = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".oasis/hf")
+        // Best-effort: the hub creates what it needs, and a failure here is not
+        // worth refusing to start over.
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
     }
 
     /// The embedded frozen server, or `nil` if this build has none (every Debug

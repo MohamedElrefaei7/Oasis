@@ -66,16 +66,68 @@ xcodebuild -project app/Oasis/Oasis.xcodeproj -scheme Oasis -configuration Relea
 - **`ENABLE_USER_SCRIPT_SANDBOXING = NO`** on the target, because the phase reads
   `dist/` at the repo root, outside the build directory.
 
-The spawn is **bare** — `child.environment` is never set, so the child simply
-inherits. The frozen binary needs no activation: PyInstaller relocated every
-dylib via rpath into `_internal/`, which the spike proved by running it under
-`env -i`. That environment-independence is the whole payoff of freezing, and it
-is what the pixi binary never had.
+### Weights and the offline environment
 
-> **Not yet in the bundle: the model weights.** The embedded server loads
-> `all-MiniLM-L6-v2` and the cross-encoder from this machine's HuggingFace cache,
-> and `HF_HUB_OFFLINE` is deliberately *not* set. Bundling weights, ad-hoc
-> signing, the `libtorch_cpu.dylib` dedup, and the DMG are each their own step.
+A second phase, `Scripts/embed_models.sh`, copies the three artifacts the server
+would otherwise fetch over the network into `Contents/Resources/`:
+
+| artifact | from | to |
+|---|---|---|
+| `all-MiniLM-L6-v2` | `~/.cache/huggingface/hub` | `Resources/models/hub/models--sentence-transformers--…` |
+| `ms-marco-MiniLM-L-6-v2` | same | `Resources/models/hub/models--cross-encoder--…` |
+| tiktoken `cl100k_base` | `$TMPDIR/data-gym-cache` | `Resources/tiktoken/<sha1-of-url>` |
+
+They are ordinary Resources, **not `--add-data` into the freeze**, so weights can
+be updated without re-freezing. The HF `hub/` layout is preserved verbatim
+(`snapshots/`, `blobs/`, `refs/`) because load-by-name resolves against it; its
+snapshot→blob symlinks are relative, so the tree survives the move.
+
+Populate the caches once if the build phase complains — it prints these:
+
+```sh
+pixi run -e default python -c "from sentence_transformers import SentenceTransformer, CrossEncoder; SentenceTransformer('all-MiniLM-L6-v2'); CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')"
+pixi run -e default python -c "import tiktoken; tiktoken.get_encoding('cl100k_base')"
+```
+
+**Watch the tiktoken one.** It is fetched from Microsoft's blob store, so no
+`HF_*` variable covers it, and the chunker only touches it while *indexing* — a
+bundle missing it starts, warms, reaches ready and searches fine, then dies on
+the first index. Its cache lives under `$TMPDIR` (a `/var/folders/…` path), not
+`~/.cache`.
+
+### The spawn environment differs by source
+
+- **Dev (`OASIS_SERVE_BIN`): bare.** `child.environment` is left alone. The
+  frozen binary needs no activation — PyInstaller relocated every dylib via
+  rpath into `_internal/`, proven by running it under `env -i` — and a dev run
+  *wants* the machine's cache and the network. Environment-independence is the
+  payoff of freezing and the thing the pixi binary never had.
+- **Bundled: pointed at the bundle, offline.**
+
+  ```
+  HF_HUB_OFFLINE=1  TRANSFORMERS_OFFLINE=1
+  HF_HUB_CACHE       = <Resources>/models/hub   # read-only half → the bundle
+  HF_HOME            = ~/.oasis/hf              # writable half  → NOT the bundle
+  TIKTOKEN_CACHE_DIR = <Resources>/tiktoken
+  ```
+
+  `HF_HOME` alone would also resolve the models (`HF_HUB_CACHE` defaults to
+  `$HF_HOME/hub`), but it is *also* where the hub writes tokens, locks and its
+  xet store — and a write inside a signed bundle breaks its seal. Hence the
+  split. Measured against sentence-transformers 5.6.1 / transformers 5.14.1 /
+  huggingface_hub 1.24.0; `TRANSFORMERS_CACHE` and `SENTENCE_TRANSFORMERS_HOME`
+  were not needed.
+
+### Testing it the only way that means anything
+
+A test with your HF cache present passes whether or not the bundling works. To
+make it able to fail: move `~/.cache/huggingface`, `$TMPDIR/data-gym-cache` and
+`~/.cache/torch` aside, turn Wi-Fi off, then Finder-launch the `.app` and
+confirm it reaches ready, **indexes** (the tiktoken path) and searches. Measured
+that way: **11.63 s launch → ready**, 1.3 GB bundle.
+
+> **Not yet done:** deliberate signing, the `libtorch_cpu.dylib` dedup (237 M × 2,
+> the largest recoverable win), and the DMG.
 
 ## What you should see
 

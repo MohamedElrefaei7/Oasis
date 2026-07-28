@@ -61,6 +61,7 @@
 				4835130E301494A0005D451E /* Frameworks */,
 				4835130F301494A0005D451E /* Resources */,
 				48B1C00130400A00005D451E /* Embed Frozen Server */,
+				48B1C00230400A00005D451E /* Embed Models */,
 			);
 			buildRules = (
 			);
@@ -139,6 +140,21 @@
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/bash;
 			shellScript = "\"${SRCROOT}/Scripts/embed_server.sh\"\n";
+		};
+		48B1C00230400A00005D451E /* Embed Models */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+			);
+			name = "Embed Models";
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/bash;
+			shellScript = "\"${SRCROOT}/Scripts/embed_models.sh\"\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
