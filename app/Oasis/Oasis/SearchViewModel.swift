@@ -73,10 +73,7 @@ final class SearchViewModel {
 
     init(controller: ServerController) {
         self.controller = controller
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 30
-        configuration.waitsForConnectivity = false
-        self.session = URLSession(configuration: configuration)
+        self.session = OasisAPI.session(timeout: 30)
     }
 
     // MARK: - Keyboard selection
@@ -246,33 +243,24 @@ final class SearchViewModel {
             return
         }
 
-        // URLComponents, never string interpolation: queries carry spaces,
+        // Query items, never string interpolation: queries carry spaces,
         // punctuation and unicode, and a hand-built "?q=\(query)" breaks on the
-        // first `&`, `+`, `#` or space.
-        var components = URLComponents()
-        components.scheme = "http"
-        components.host = "127.0.0.1"
-        components.port = handshake.port
-        components.path = "/api/search"
-        components.queryItems = [
-            URLQueryItem(name: "q", value: trimmed),
-            URLQueryItem(name: "mode", value: "hybrid"),
-            URLQueryItem(name: "limit", value: String(resultLimit)),
-            // The eval-measured best path and the endpoint's own default: NL
-            // parsing costs −0.108 ndcg@10. Don't ask for a parse.
-            URLQueryItem(name: "raw", value: "true"),
-        ]
-
-        guard let url = components.url else {
+        // first `&`, `+`, `#` or space. OasisAPI.url percent-encodes them.
+        guard let request = OasisAPI.request(
+            "/api/search",
+            handshake: handshake,
+            query: [
+                URLQueryItem(name: "q", value: trimmed),
+                URLQueryItem(name: "mode", value: "hybrid"),
+                URLQueryItem(name: "limit", value: String(resultLimit)),
+                // The eval-measured best path and the endpoint's own default: NL
+                // parsing costs −0.108 ndcg@10. Don't ask for a parse.
+                URLQueryItem(name: "raw", value: "true"),
+            ]
+        ) else {
             state = .failed("Couldn't build the search URL.")
             return
         }
-
-        var request = URLRequest(url: url)
-        // The first authenticated call in the app. Loopback binding isn't authn
-        // on a shared machine; the token is what actually gates the API.
-        request.setValue("Bearer \(handshake.token)", forHTTPHeaderField: "Authorization")
-        request.cachePolicy = .reloadIgnoringLocalCacheData
 
         do {
             let (data, response) = try await session.data(for: request)
@@ -281,9 +269,9 @@ final class SearchViewModel {
                 return
             }
 
-            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            let status = OasisAPI.statusCode(response)
             guard (200..<300).contains(status) else {
-                let message = Self.decodeErrorMessage(from: data) ?? "the server returned HTTP \(status)."
+                let message = OasisAPI.failureDetail(from: data, status: status)
                 Self.log.error("search failed (\(status)): \(message, privacy: .public)")
                 state = .failed("Search failed — \(message)")
                 return
@@ -325,12 +313,4 @@ final class SearchViewModel {
         }
     }
 
-    /// Pull `message` out of the `{error: {code, message}}` envelope every
-    /// endpoint uses, so a failure reads as a sentence and not a status code.
-    private static func decodeErrorMessage(from data: Data) -> String? {
-        guard let envelope = try? JSONDecoder().decode(ErrorResponse.self, from: data) else {
-            return nil
-        }
-        return envelope.error.message
-    }
 }

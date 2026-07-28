@@ -19,16 +19,14 @@ belongs in the threadpool, not on the event loop.
 
 from __future__ import annotations
 
-import contextlib
 from datetime import UTC, datetime
-from pathlib import Path
 
 from fastapi import APIRouter, Request
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from oasis.api.schemas import StatusResponse
 from oasis.api.state import AppState, get_conn
-from oasis.index.db import SCHEMA_VERSION
+from oasis.index.db import db_size_bytes
 from oasis.index.keyword import KeywordIndex
 
 # Above this document count, count_stale()'s per-file stat scan is too costly to
@@ -38,19 +36,6 @@ from oasis.index.keyword import KeywordIndex
 STALE_SCAN_CAP = 5000
 
 router = APIRouter()
-
-
-def _db_size_bytes(db_path: Path) -> int:
-    """Total on-disk size of the SQLite DB and its -wal/-shm companions.
-
-    The companions are absent after a checkpoint, so a missing one contributes
-    nothing rather than erroring.
-    """
-    total = 0
-    for p in (db_path, Path(str(db_path) + "-wal"), Path(str(db_path) + "-shm")):
-        with contextlib.suppress(OSError):
-            total += p.stat().st_size
-    return total
 
 
 @router.get("/status", response_model=StatusResponse)
@@ -70,18 +55,12 @@ def status(request: Request) -> StatusResponse:
     idx = KeywordIndex(get_conn(state.db_path))
     caps = idx.get_capabilities()
 
-    # semantic_ready and reindex_recommended: the live-embedder comparison and
-    # version math live here, derived exactly as /api/health derives them (the
-    # client does no version math), so status and health can't drift apart.
+    # Both derivations live on IndexCapabilities, so /api/health and this
+    # endpoint compute them from one implementation rather than two copies —
+    # the "these two can't disagree" promise is now structural.
     live_dimension = state.embedder.dimension if state.embedder is not None else None
-    semantic_ready = (
-        caps.vectors_built
-        and caps.embedding_dimension is not None
-        and caps.embedding_dimension == live_dimension
-    )
-    reindex_recommended = caps.document_count > 0 and (
-        caps.schema_version < SCHEMA_VERSION or not semantic_ready
-    )
+    semantic_ready = caps.semantic_ready(live_dimension)
+    reindex_recommended = caps.reindex_recommended(live_dimension)
 
     last_at = idx.last_indexed_at()
     # mtime/indexed_at are UTC Unix timestamps; make the datetime UTC-aware so
@@ -97,7 +76,7 @@ def status(request: Request) -> StatusResponse:
 
     return StatusResponse(
         documents=caps.document_count,
-        db_size_bytes=_db_size_bytes(state.db_path),
+        db_size_bytes=db_size_bytes(state.db_path),
         last_indexed_at=last_indexed_at,
         db_path=str(state.db_path),
         schema_version=caps.schema_version,

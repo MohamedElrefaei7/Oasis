@@ -76,19 +76,14 @@ final class IndexRunner {
     init(controller: ServerController) {
         self.controller = controller
 
-        let short = URLSessionConfiguration.ephemeral
-        short.timeoutIntervalForRequest = 15
-        short.waitsForConnectivity = false
-        self.session = URLSession(configuration: short)
+        self.session = OasisAPI.session(timeout: 15)
 
-        let streaming = URLSessionConfiguration.ephemeral
-        streaming.timeoutIntervalForRequest = 60
+        let streaming = OasisAPI.session(timeout: 60)
         // A first-time index of ~/Documents is minutes; the resource timeout must
         // not be the thing that ends it. (Default is 7 days — set explicitly so a
         // future config change can't silently cap a long index.)
-        streaming.timeoutIntervalForResource = 24 * 60 * 60
-        streaming.waitsForConnectivity = false
-        self.streamSession = URLSession(configuration: streaming)
+        streaming.configuration.timeoutIntervalForResource = 24 * 60 * 60
+        self.streamSession = streaming
     }
 
     // MARK: - Run one job
@@ -109,19 +104,10 @@ final class IndexRunner {
         guard let handshake = controller.handshake else {
             return .failed("The server isn't running.")
         }
-        guard let url = Self.endpoint(port: handshake.port, path: "/api/index") else {
-            return .failed("Couldn't build the index URL.")
-        }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(handshake.token)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.cachePolicy = .reloadIgnoringLocalCacheData
-        do {
-            request.httpBody = try JSONEncoder().encode(IndexRequest(root: root, force: force))
-        } catch {
-            return .failed("Couldn't encode the index request: \(error.localizedDescription)")
+        guard let request = OasisAPI.request(
+            "/api/index", handshake: handshake, json: IndexRequest(root: root, force: force)
+        ) else {
+            return .failed("Couldn't build the index request.")
         }
 
         Self.log.notice("POST /api/index root=\(root, privacy: .public) force=\(force)")
@@ -131,7 +117,7 @@ final class IndexRunner {
         do {
             let (body, response) = try await session.data(for: request)
             data = body
-            status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            status = OasisAPI.statusCode(response)
         } catch {
             guard !Task.isCancelled else { return .interrupted }
             return .failed("Couldn't reach the server: \(error.localizedDescription)")
@@ -150,7 +136,7 @@ final class IndexRunner {
             // Single-job lock. Callers serialize their own jobs, so reaching
             // here means something else is indexing (a stray CLI run, a job
             // left over from a previous window).
-            let message = Self.errorMessage(from: data) ?? "An index job is already running."
+            let message = OasisAPI.errorMessage(from: data) ?? "An index job is already running."
             Self.log.error("index rejected (409): \(message, privacy: .public)")
             return .failed(message)
 
@@ -158,12 +144,12 @@ final class IndexRunner {
             // Reindex can genuinely hit this where the picker can't: a recorded
             // root that has since been deleted or unmounted is no longer a
             // directory.
-            let message = Self.errorMessage(from: data) ?? "That isn't a directory: \(root)"
+            let message = OasisAPI.errorMessage(from: data) ?? "That isn't a directory: \(root)"
             Self.log.error("index rejected (400): \(message, privacy: .public)")
             return .failed(message)
 
         default:
-            let message = Self.errorMessage(from: data) ?? "the server returned HTTP \(status)."
+            let message = OasisAPI.failureDetail(from: data, status: status)
             Self.log.error("index failed (\(status)): \(message, privacy: .public)")
             return .failed("Indexing couldn't start — \(message)")
         }
@@ -204,23 +190,19 @@ final class IndexRunner {
         attempt: Int,
         onProgress: (Progress) -> Void
     ) async -> Outcome? {
-        guard let url = Self.endpoint(port: handshake.port, path: "/api/index/events") else {
+        guard var request = OasisAPI.request("/api/index/events", handshake: handshake) else {
             return .failed("Couldn't build the event-stream URL.")
         }
-
-        var request = URLRequest(url: url)
-        request.setValue("Bearer \(handshake.token)", forHTTPHeaderField: "Authorization")
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-        request.cachePolicy = .reloadIgnoringLocalCacheData
 
         do {
             let (bytes, response) = try await streamSession.bytes(for: request)
-            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            let status = OasisAPI.statusCode(response)
             guard status == 200 else {
                 // Drain enough to read the envelope; the body is one small JSON.
                 var body = Data()
                 for try await byte in bytes.prefix(4096) { body.append(byte) }
-                let message = Self.errorMessage(from: body) ?? "the server returned HTTP \(status)."
+                let message = OasisAPI.failureDetail(from: body, status: status)
                 return .failed("Couldn't follow indexing progress — \(message)")
             }
 
@@ -344,19 +326,15 @@ final class IndexRunner {
         guard let id = jobID, let handshake = controller.handshake else {
             return .failed("No job to cancel.")
         }
-        guard let url = Self.endpoint(port: handshake.port, path: "/api/index/cancel") else {
-            return .failed("Couldn't build the cancel URL.")
+        guard let request = OasisAPI.request(
+            "/api/index/cancel", handshake: handshake, json: CancelRequest(jobID: id)
+        ) else {
+            return .failed("Couldn't build the cancel request.")
         }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(handshake.token)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try? JSONEncoder().encode(CancelRequest(jobID: id))
 
         do {
             let (data, response) = try await session.data(for: request)
-            switch (response as? HTTPURLResponse)?.statusCode ?? 0 {
+            switch OasisAPI.statusCode(response) {
             case 202:
                 Self.log.notice("cancel accepted for job \(id, privacy: .public) — waiting for the terminal event")
                 return .requested
@@ -364,7 +342,7 @@ final class IndexRunner {
                 Self.log.notice("cancel 409 for job \(id, privacy: .public) — the job already finished")
                 return .alreadyFinished
             case let status:
-                let message = Self.errorMessage(from: data) ?? "the server returned HTTP \(status)."
+                let message = OasisAPI.failureDetail(from: data, status: status)
                 Self.log.error("cancel failed (\(status)): \(message, privacy: .public)")
                 return .failed(message)
             }
@@ -374,20 +352,4 @@ final class IndexRunner {
         }
     }
 
-    // MARK: - Helpers
-
-    static func endpoint(port: Int, path: String) -> URL? {
-        var components = URLComponents()
-        components.scheme = "http"
-        components.host = "127.0.0.1"
-        components.port = port
-        components.path = path
-        return components.url
-    }
-
-    /// Pull `message` out of the `{error: {code, message}}` envelope every
-    /// endpoint uses.
-    static func errorMessage(from data: Data) -> String? {
-        try? JSONDecoder().decode(ErrorResponse.self, from: data).error.message
-    }
 }

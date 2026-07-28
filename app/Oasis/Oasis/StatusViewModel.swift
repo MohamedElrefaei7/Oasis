@@ -73,10 +73,7 @@ final class StatusViewModel {
 
     init(controller: ServerController) {
         self.controller = controller
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 15
-        configuration.waitsForConnectivity = false
-        self.session = URLSession(configuration: configuration)
+        self.session = OasisAPI.session(timeout: 15)
     }
 
     /// Fire-and-forget refresh, for view lifecycle callbacks.
@@ -96,20 +93,16 @@ final class StatusViewModel {
 
     private func reload() async {
         guard let handshake = controller.handshake,
-              let url = IndexRunner.endpoint(port: handshake.port, path: "/api/status")
+              let request = OasisAPI.request("/api/status", handshake: handshake)
         else {
             state = .failed("The server isn't running.")
             return
         }
 
-        var request = URLRequest(url: url)
-        request.setValue("Bearer \(handshake.token)", forHTTPHeaderField: "Authorization")
-        request.cachePolicy = .reloadIgnoringLocalCacheData
-
         do {
             let (data, response) = try await session.data(for: request)
             guard !Task.isCancelled else { return }
-            let httpStatus = (response as? HTTPURLResponse)?.statusCode ?? 0
+            let httpStatus = OasisAPI.statusCode(response)
 
             switch httpStatus {
             case 200:
@@ -126,7 +119,7 @@ final class StatusViewModel {
                 state = .empty(nil)
 
             default:
-                let message = IndexRunner.errorMessage(from: data) ?? "the server returned HTTP \(httpStatus)."
+                let message = OasisAPI.failureDetail(from: data, status: httpStatus)
                 Self.log.error("status failed (\(httpStatus)): \(message, privacy: .public)")
                 state = .failed(message)
             }

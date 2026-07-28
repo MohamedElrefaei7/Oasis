@@ -5,9 +5,37 @@ import tiktoken
 CHUNK_SIZE = 500
 OVERLAP = 50
 
-# Loaded once at import time; tiktoken caches the encoding file on disk after
-# the first download so subsequent imports are fast.
-_ENC: tiktoken.Encoding = tiktoken.get_encoding("cl100k_base")
+ENCODING_NAME = "cl100k_base"
+
+_ENC: tiktoken.Encoding | None = None
+
+
+def encoding() -> tiktoken.Encoding:
+    """The BPE encoding, loaded on first use and cached for the process.
+
+    **Deliberately lazy, and the reason is the frozen binary.** This used to run
+    at import time, which meant every entry point that so much as imported
+    ``oasis.cli.app`` paid for it — ``oasis search``, ``oasis status``, and the
+    server's startup, none of which chunk anything. Two concrete costs:
+
+    1. ``get_encoding`` resolves through the ``tiktoken_ext`` namespace package
+       and, on a cold cache, **downloads the BPE file**. At import time that put
+       a network round trip on the startup path of commands that never needed
+       it, and it is the wrong thing for an app that must work offline.
+    2. In the PyInstaller bundle it failed *before the handshake was printed* —
+       ``ValueError: Unknown encoding cl100k_base. Plugins found: []`` raised
+       while importing the CLI module, so the server died with no handshake and
+       no clue. Deferring it moves any such failure to the indexing path, where
+       it is attributable and where the caller is already prepared to report a
+       failure per file.
+
+    (The bundle still needs ``--collect-submodules tiktoken_ext``; laziness
+    changes *when* the plugin scan happens, not whether it must succeed.)
+    """
+    global _ENC
+    if _ENC is None:
+        _ENC = tiktoken.get_encoding(ENCODING_NAME)
+    return _ENC
 
 
 @dataclass
@@ -36,7 +64,8 @@ def chunk_document(
     if not text or not text.strip():
         return []
 
-    tokens = _ENC.encode(text)
+    enc = encoding()
+    tokens = enc.encode(text)
     if not tokens:
         return []
 
@@ -49,7 +78,7 @@ def chunk_document(
         chunk_tokens = tokens[start:end]
         chunks.append(Chunk(
             chunk_index=len(chunks),
-            text=_ENC.decode(chunk_tokens),
+            text=enc.decode(chunk_tokens),
             token_count=len(chunk_tokens),
         ))
         if end == len(tokens):

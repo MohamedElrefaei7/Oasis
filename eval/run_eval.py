@@ -56,9 +56,9 @@ from oasis.llm.ollama import DEFAULT_MODEL as OLLAMA_MODEL
 from oasis.query.parser import _SYSTEM_PROMPT, ParsedQuery, parse_query
 from oasis.query.reranker import CrossEncoderReranker
 from oasis.query.retriever import (
-    _build_fts_query,
-    _build_kw_filters,
-    _build_vec_where,
+    build_fts_query,
+    build_kw_filters,
+    build_vec_where,
     hybrid_search,
 )
 
@@ -328,7 +328,7 @@ def run_one_query(
         # genuinely empty here — same as the CLI, which exits 1.
         try:
             kw = KeywordIndex(conn).search(
-                _build_fts_query(parsed), limit=FINAL_TOP_N, **_build_kw_filters(parsed)
+                build_fts_query(parsed), limit=FINAL_TOP_N, **build_kw_filters(parsed)
             )
         except sqlite3.OperationalError as exc:
             logger.warning("Search error for %s (%s) — scoring as empty", q.id, exc)
@@ -340,7 +340,7 @@ def run_one_query(
         # Never parses the query as an expression, so FTS5 syntax can't bite.
         # Over-fetch, then dedupe to the best chunk per doc — exactly as the CLI.
         qv = embedder.embed([parsed.semantic_query])[0]
-        raw = vector_index.search(qv, limit=FINAL_TOP_N * 3, where=_build_vec_where(parsed))
+        raw = vector_index.search(qv, limit=FINAL_TOP_N * 3, where=build_vec_where(parsed))
         best: dict[str, object] = {}
         for r in raw:
             if r.path not in best or r.score < best[r.path].score:  # type: ignore[union-attr]

@@ -18,10 +18,10 @@ from oasis.query.retriever import (
     DEFAULT_TOP_N,
     RRF_K,
     HybridResult,
-    _build_fts_query,
-    _build_kw_filters,
-    _build_vec_where,
     _rrf,
+    build_fts_query,
+    build_kw_filters,
+    build_vec_where,
     hybrid_search,
 )
 
@@ -134,48 +134,48 @@ def test_rrf_k_constant_is_60() -> None:
 
 
 # ---------------------------------------------------------------------------
-# _build_fts_query
+# build_fts_query
 # ---------------------------------------------------------------------------
 
 
 def test_build_fts_query_no_keywords() -> None:
-    assert _build_fts_query(_pq("machine learning")) == "machine learning"
+    assert build_fts_query(_pq("machine learning")) == "machine learning"
 
 
 def test_build_fts_query_single_keyword_appended() -> None:
-    result = _build_fts_query(_pq("tax documents", keywords=["tax"]))
+    result = build_fts_query(_pq("tax documents", keywords=["tax"]))
     assert result.startswith("tax documents")
     assert "tax" in result
 
 
 def test_build_fts_query_multi_word_keyword_quoted() -> None:
-    result = _build_fts_query(_pq("documents", keywords=["data protection"]))
+    result = build_fts_query(_pq("documents", keywords=["data protection"]))
     assert '"data protection"' in result
 
 
 def test_build_fts_query_single_word_keyword_unquoted() -> None:
-    result = _build_fts_query(_pq("compliance", keywords=["GDPR"]))
+    result = build_fts_query(_pq("compliance", keywords=["GDPR"]))
     assert "GDPR" in result
     assert '"GDPR"' not in result
 
 
 def test_build_fts_query_multiple_keywords() -> None:
-    result = _build_fts_query(_pq("report", keywords=["Q3", "budget"]))
+    result = build_fts_query(_pq("report", keywords=["Q3", "budget"]))
     assert "Q3" in result
     assert "budget" in result
 
 
 # ---------------------------------------------------------------------------
-# _build_vec_where
+# build_vec_where
 # ---------------------------------------------------------------------------
 
 
 def test_build_vec_where_none_when_no_filters() -> None:
-    assert _build_vec_where(_pq("query")) is None
+    assert build_vec_where(_pq("query")) is None
 
 
 def test_build_vec_where_file_types() -> None:
-    result = _build_vec_where(_pq("q", file_types=[".pdf"]))
+    result = build_vec_where(_pq("q", file_types=[".pdf"]))
     assert result is not None
     assert ".pdf" in result
     assert "extension" in result
@@ -183,69 +183,92 @@ def test_build_vec_where_file_types() -> None:
 
 def test_build_vec_where_date_after() -> None:
     dr = DateRange(after=datetime(2024, 1, 1))
-    result = _build_vec_where(_pq("q", date_range=dr))
+    result = build_vec_where(_pq("q", date_range=dr))
     assert result is not None
     assert "mtime >=" in result
 
 
 def test_build_vec_where_date_before() -> None:
     dr = DateRange(before=datetime(2025, 1, 1))
-    result = _build_vec_where(_pq("q", date_range=dr))
+    result = build_vec_where(_pq("q", date_range=dr))
     assert result is not None
     assert "mtime <" in result
 
 
 def test_build_vec_where_date_range_both() -> None:
     dr = DateRange(after=datetime(2024, 1, 1), before=datetime(2025, 1, 1))
-    result = _build_vec_where(_pq("q", date_range=dr))
+    result = build_vec_where(_pq("q", date_range=dr))
     assert result is not None
     assert "mtime >=" in result
     assert "mtime <" in result
 
 
 def test_build_vec_where_folder() -> None:
-    result = _build_vec_where(_pq("q", folders=["/home/user/docs"]))
+    result = build_vec_where(_pq("q", folders=["/home/user/docs"]))
     assert result is not None
     assert "path LIKE" in result
     assert "/home/user/docs" in result
+    # The separator boundary, so /home/user/docs doesn't match /home/user/docsX.
+    assert "/home/user/docs/%" in result
+
+
+def test_build_vec_where_folder_escapes_like_wildcards() -> None:
+    """`_` and `%` are LIKE wildcards and ordinary filename characters both.
+
+    Without the escape a folder named `a_b` matches `axb` — the same bug the
+    keyword arm had, and the two arms have to agree on what "under this
+    folder" means or hybrid fuses two different answers.
+    """
+    result = build_vec_where(_pq("q", folders=["/tmp/a_b", "/tmp/100%"]))
+    assert result is not None
+    assert r"/tmp/a\_b/%" in result
+    assert r"/tmp/100\%/%" in result
+    assert "ESCAPE" in result
+
+
+def test_build_vec_where_folder_escapes_sql_quote() -> None:
+    """A path with an apostrophe must not break out of the SQL literal."""
+    result = build_vec_where(_pq("q", folders=["/tmp/alice's files"]))
+    assert result is not None
+    assert "alice''s files" in result
 
 
 def test_build_vec_where_combines_with_and() -> None:
     dr = DateRange(after=datetime(2024, 1, 1))
-    result = _build_vec_where(_pq("q", file_types=[".pdf"], date_range=dr))
+    result = build_vec_where(_pq("q", file_types=[".pdf"], date_range=dr))
     assert result is not None
     assert " AND " in result
 
 
 # ---------------------------------------------------------------------------
-# _build_kw_filters
+# build_kw_filters
 # ---------------------------------------------------------------------------
 
 
 def test_build_kw_filters_empty_for_plain_query() -> None:
-    assert _build_kw_filters(_pq("query")) == {}
+    assert build_kw_filters(_pq("query")) == {}
 
 
 def test_build_kw_filters_after_key() -> None:
     dr = DateRange(after=datetime(2024, 1, 1))
-    filters = _build_kw_filters(_pq("q", date_range=dr))
+    filters = build_kw_filters(_pq("q", date_range=dr))
     assert "after" in filters
     assert isinstance(filters["after"], float)
 
 
 def test_build_kw_filters_before_key() -> None:
     dr = DateRange(before=datetime(2025, 1, 1))
-    filters = _build_kw_filters(_pq("q", date_range=dr))
+    filters = build_kw_filters(_pq("q", date_range=dr))
     assert "before" in filters
 
 
 def test_build_kw_filters_extensions() -> None:
-    filters = _build_kw_filters(_pq("q", file_types=[".pdf"]))
+    filters = build_kw_filters(_pq("q", file_types=[".pdf"]))
     assert filters.get("extensions") == [".pdf"]
 
 
 def test_build_kw_filters_folders_expanded() -> None:
-    filters = _build_kw_filters(_pq("q", folders=["/abs/path"]))
+    filters = build_kw_filters(_pq("q", folders=["/abs/path"]))
     assert "/abs/path" in filters.get("folders", [])
 
 

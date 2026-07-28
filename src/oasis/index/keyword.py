@@ -6,11 +6,42 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from oasis.index.db import SCHEMA_VERSION
 from oasis.models import ExtractedDocument
 
 
 def _file_hash(size: int | None, mtime: float | None) -> str:
     return hashlib.sha256(f"{size}:{mtime}".encode()).hexdigest()[:16]
+
+
+# Escape character for LIKE patterns built from user-supplied paths.
+LIKE_ESCAPE = "\\"
+
+
+def folder_like_pattern(folder: str) -> str:
+    """A LIKE pattern matching exactly the files *under* directory *folder*.
+
+    Two ways a naive ``LIKE folder + '%'`` is wrong, and both were live:
+
+    1. **No separator boundary.** ``/tmp/a`` matched ``/tmp/ab/sibling.txt``,
+       because a bare prefix says nothing about where the directory ends. The
+       trailing separator is what makes "under this folder" mean it.
+    2. **``_`` and ``%`` are LIKE wildcards.** They are perfectly ordinary
+       characters in a filename, so a folder literally named ``a_b`` matched
+       ``axb`` — the same class of bug ``docs_under`` avoids by filtering in
+       Python. Here the filter has to stay in SQL (it composes with the FTS5
+       MATCH in one statement), so the wildcards are escaped instead and the
+       caller pairs this with ``ESCAPE '\\'``.
+
+    Callers must use the abspath form storage uses; matching is textual.
+    """
+    prefix = folder.rstrip("/")
+    escaped = (
+        prefix.replace(LIKE_ESCAPE, LIKE_ESCAPE * 2)
+        .replace("%", LIKE_ESCAPE + "%")
+        .replace("_", LIKE_ESCAPE + "_")
+    )
+    return f"{escaped}{os.sep}%"
 
 # Non-printable sentinels passed to snippet() via SQLite's char() function.
 # char(2)/char(3) in the SQL avoids any string interpolation in the query.
@@ -43,6 +74,34 @@ class IndexCapabilities:
     embedding_model: str | None
     embedding_dimension: int | None
     document_count: int
+
+    def semantic_ready(self, live_dimension: int | None) -> bool:
+        """Vectors exist **and** were built at the dimension now in use.
+
+        The live-embedder comparison can't live in ``get_capabilities`` (which
+        is a pure DB read by design), but it must not live in each endpoint
+        either: ``/api/health`` and ``/api/status`` both report this field and
+        both docstrings promise they can't disagree — a promise that was kept
+        by copy-paste until 2026-07-28. Stored vectors at a different dimension
+        are unusable, so they don't count as ready.
+        """
+        return (
+            self.vectors_built
+            and self.embedding_dimension is not None
+            and self.embedding_dimension == live_dimension
+        )
+
+    def reindex_recommended(self, live_dimension: int | None) -> bool:
+        """Whether the app should nudge the user to reindex.
+
+        Derived **server-side**; the client does no version math. The
+        ``document_count > 0`` guard is what keeps a never-indexed DB reading as
+        "index me" (false) rather than "reindex me" — two different states, and
+        the app words them differently.
+        """
+        return self.document_count > 0 and (
+            self.schema_version < SCHEMA_VERSION or not self.semantic_ready(live_dimension)
+        )
 
 
 class KeywordIndex:
@@ -151,8 +210,9 @@ class KeywordIndex:
         Args:
             after:      Minimum mtime (Unix timestamp, inclusive).
             before:     Maximum mtime (Unix timestamp, exclusive).
-            folders:    Absolute path prefixes — rows whose path starts with any
-                        entry are kept (LIKE ``prefix/%`` matching).
+            folders:    Absolute directory paths — rows *under* any of them are
+                        kept, on a separator boundary and with LIKE wildcards in
+                        the path escaped (see ``folder_like_pattern``).
             extensions: Allowed file extensions, e.g. ``[".pdf", ".pptx"]``.
         """
         params: list[object] = [query]
@@ -165,9 +225,9 @@ class KeywordIndex:
             extra.append("d.mtime < ?")
             params.append(before)
         if folders:
-            conds = " OR ".join("d.path LIKE ?" for _ in folders)
+            conds = " OR ".join(f"d.path LIKE ? ESCAPE '{LIKE_ESCAPE}'" for _ in folders)
             extra.append(f"({conds})")
-            params.extend(f"{f.rstrip('/')}%" for f in folders)
+            params.extend(folder_like_pattern(f) for f in folders)
         if extensions:
             phs = ",".join("?" * len(extensions))
             extra.append(f"d.extension IN ({phs})")

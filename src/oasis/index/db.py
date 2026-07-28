@@ -1,3 +1,4 @@
+import contextlib
 import sqlite3
 from pathlib import Path
 
@@ -64,6 +65,22 @@ AFTER UPDATE ON documents BEGIN
     VALUES (new.id, new.path, new.title, new.content);
 END;
 """
+
+
+def db_size_bytes(db_path: Path) -> int:
+    """On-disk size of the index: the SQLite file **plus its -wal/-shm companions**.
+
+    The companions are the whole point. In WAL mode a freshly-finished index
+    can hold most of its new content in a `-wal` that hasn't been checkpointed
+    yet, so `stat()` on the `.db` alone under-reports — which is how `oasis
+    status` and the app's statistics panel came to print different sizes for
+    the same index. A missing companion contributes nothing rather than raising.
+    """
+    total = 0
+    for p in (db_path, Path(f"{db_path}-wal"), Path(f"{db_path}-shm")):
+        with contextlib.suppress(OSError):
+            total += p.stat().st_size
+    return total
 
 
 def open_db(db_path: Path) -> sqlite3.Connection:

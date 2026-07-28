@@ -203,11 +203,15 @@ struct StatisticsPanelView: View {
 
     // MARK: - Roots
 
-    /// Read-only. **Removing a root is a later step** — `indexed_roots` is
-    /// append-only server-side today, so there is no endpoint to remove one, and
-    /// a client-side "hide" that the next index re-adds would be a lie. This
-    /// panel is the seed of that manage-folders screen, so each root is its own
-    /// row with room on the trailing edge for the affordance to land.
+    /// Read-only **here** — removing a root lives in Settings ▸ Folders, on
+    /// `POST /api/index/remove-root` (step 8).
+    ///
+    /// This panel is a summary, not a manager: it answers "what does my index
+    /// cover?" beside the counts, and a destructive control has no business
+    /// sitting in a statistics readout with no room for the confirm that has to
+    /// precede it. The row-per-root layout this comment once reserved space for
+    /// is what Settings ▸ Folders was built on, and both read the same
+    /// `StatusViewModel`, so the two lists cannot disagree.
     private func rootsSection(_ roots: [String], caption: String?) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {

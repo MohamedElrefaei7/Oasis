@@ -2,7 +2,6 @@ import json
 import sqlite3
 import subprocess
 from datetime import datetime
-from enum import StrEnum
 from pathlib import Path
 
 import typer
@@ -20,7 +19,7 @@ from rich.table import Table
 from rich.text import Text
 
 from oasis.config import load_config
-from oasis.index.db import open_db
+from oasis.index.db import db_size_bytes, open_db
 from oasis.index.embeddings import SentenceTransformerEmbedder
 from oasis.index.keyword import MATCH_END, MATCH_START, KeywordIndex
 from oasis.index.pipeline import index_directory
@@ -28,14 +27,8 @@ from oasis.index.vector import VectorIndex
 from oasis.llm.manager import ensure_ollama
 from oasis.query.parser import ParsedQuery, parse_query
 from oasis.query.reranker import CrossEncoderReranker
-from oasis.query.retriever import DEFAULT_TOP_N, hybrid_search
-from oasis.query.snippets import text_snippet
-
-
-class SearchMode(StrEnum):
-    keyword = "keyword"
-    semantic = "semantic"
-    hybrid = "hybrid"
+from oasis.query.retriever import DEFAULT_TOP_N
+from oasis.query.search import SearchMode, run_search
 
 
 class _ChunksPerSecColumn(ProgressColumn):
@@ -236,6 +229,29 @@ def _footer(n: int, mode: str, db_path: Path, *, llm_parsed: bool = False) -> st
     return "\n[dim]" + "  ·  ".join(parts) + "[/dim]"
 
 
+def _parse_cli_query(query: str, *, raw: bool) -> tuple[ParsedQuery, bool]:
+    """Resolve the ParsedQuery. Returns (parsed, whether the LLM produced it).
+
+    Always yields a valid ParsedQuery so downstream code never handles None: an
+    absent Ollama, or a parse that raises, falls back to the raw string. The
+    server's ``api/search._parse`` is the same contract with one difference that
+    is deliberate on both sides — it defaults ``raw`` to *true* (NL parsing
+    measured −0.108 ndcg@10), while the CLI keeps parsing on by default because
+    the CLI is where the feature is exercised and inspected.
+    """
+    if raw:
+        return ParsedQuery(semantic_query=query), False
+
+    with _console.status("[dim]Parsing query…[/dim]", spinner="dots"):
+        llm = ensure_ollama()
+        if llm is None:
+            return ParsedQuery(semantic_query=query), False
+        try:
+            return parse_query(query, llm), True
+        except Exception:
+            return ParsedQuery(semantic_query=query), False
+
+
 # ---------------------------------------------------------------------------
 # search
 # ---------------------------------------------------------------------------
@@ -263,110 +279,43 @@ def cmd_search(
         _err.print("[red]No index found.[/red] Run [bold]oasis index <path>[/bold] first.")
         raise typer.Exit(1)
 
-    lance_path = db_path.with_name(db_path.stem + ".lance")
+    parsed, llm_parsed = _parse_cli_query(query, raw=raw)
 
-    # ---------------------------------------------------- NL query parsing
-    # parsed is always a valid ParsedQuery — either from the LLM or a minimal
-    # fallback so that downstream code never needs to handle None.
-    parsed: ParsedQuery
-    llm_parsed = False
-    if raw:
-        parsed = ParsedQuery(semantic_query=query)
-    else:
-        with _console.status("[dim]Parsing query…[/dim]", spinner="dots"):
-            llm = ensure_ollama()
-            if llm is not None:
-                try:
-                    parsed = parse_query(query, llm)
-                    llm_parsed = True
-                except Exception:
-                    parsed = ParsedQuery(semantic_query=query)
-            else:
-                parsed = ParsedQuery(semantic_query=query)
-
-    from oasis.query.retriever import (
-        _build_vec_where,  # local import avoids circular at module level
-    )
-
-    # ------------------------------------------------------------------ keyword
-    if mode == SearchMode.keyword:
-        from oasis.query.retriever import _build_fts_query, _build_kw_filters
-        conn = open_db(db_path)
-        try:
-            kw_results = KeywordIndex(conn).search(
-                _build_fts_query(parsed), limit=limit, **_build_kw_filters(parsed)
+    # Keyword mode touches neither the embedder nor LanceDB, so it must not pay
+    # a model load to answer — the reason run_search takes them as optional.
+    embedder = None
+    vector_index = None
+    reranker = None
+    if mode is not SearchMode.keyword:
+        with _console.status("[dim]Loading models…[/dim]", spinner="dots"):
+            embedder = SentenceTransformerEmbedder()
+            vector_index = VectorIndex(
+                db_path.with_name(db_path.stem + ".lance"), dimension=embedder.dimension
             )
-        except sqlite3.OperationalError as exc:
-            _err.print(f"[red]Query error:[/red] {exc}")
-            _err.print('Tip: wrap phrases in double quotes — e.g. oasis search \\"machine learning\\"')
-            raise typer.Exit(1) from None
-        finally:
-            conn.close()
+            if mode is SearchMode.hybrid:
+                reranker = CrossEncoderReranker()
 
-        if not kw_results:
-            _console.print("[dim]No results.[/dim]")
-            return
-
-        rows = [(r.path, r.title, _highlight_snippet(r.snippet)) for r in kw_results]
-        _render_results_table(rows)
-        _console.print(_footer(len(rows), "keyword", db_path, llm_parsed=llm_parsed))
-        _save_last_results([r.path for r in kw_results])
-        return
-
-    # ------------------------------------------------- semantic / hybrid: load models
-    with _console.status("[dim]Loading models…[/dim]", spinner="dots"):
-        emb = SentenceTransformerEmbedder()
-        vec_idx = VectorIndex(lance_path, dimension=emb.dimension)
-
-    # ----------------------------------------------------------------- semantic
-    if mode == SearchMode.semantic:
-        vec_where = _build_vec_where(parsed)
-        query_vec = emb.embed([parsed.semantic_query])[0]
-        # Over-fetch to leave room for per-doc chunk dedup.
-        raw_results = vec_idx.search(query_vec, limit=limit * 3, where=vec_where)
-
-        best: dict[str, object] = {}
-        for r in raw_results:
-            if r.path not in best or r.score < best[r.path].score:  # type: ignore[union-attr]
-                best[r.path] = r
-        deduped = sorted(best.values(), key=lambda r: r.score)[:limit]  # type: ignore[attr-defined]
-
-        if not deduped:
-            _console.print("[dim]No results.[/dim]")
-            return
-
-        rows = [
-            (Path(r.path), None, _highlight_snippet(text_snippet(r.text, parsed.semantic_query)))  # type: ignore[attr-defined]
-            for r in deduped
-        ]
-        _render_results_table(rows)
-        _console.print(_footer(len(rows), "semantic", db_path, llm_parsed=llm_parsed))
-        _save_last_results([Path(r.path) for r in deduped])  # type: ignore[attr-defined]
-        return
-
-    # ------------------------------------------------------------------ hybrid
     conn = open_db(db_path)
     try:
-        # Fetch extra candidates so the reranker has a larger pool to work with.
-        candidates = hybrid_search(conn, vec_idx, emb, parsed, top_n=max(limit * 2, 20))
+        results = run_search(
+            conn, vector_index, embedder, reranker, query, parsed, mode=mode, limit=limit
+        )
     except sqlite3.OperationalError as exc:
+        # Only reachable from keyword mode and from a hybrid run whose *both*
+        # arms failed; hybrid otherwise degrades to the surviving one.
         _err.print(f"[red]Query error:[/red] {exc}")
         _err.print('Tip: wrap phrases in double quotes — e.g. oasis search \\"machine learning\\"')
         raise typer.Exit(1) from None
     finally:
         conn.close()
 
-    reranker = CrossEncoderReranker()
-    final = reranker.rerank(parsed.semantic_query, candidates, top_n=limit)
-
-    if not final:
+    if not results:
         _console.print("[dim]No results.[/dim]")
         return
 
-    rows = [(r.path, r.title, _highlight_snippet(r.snippet)) for r in final]
-    _render_results_table(rows)
-    _console.print(_footer(len(final), "hybrid", db_path, llm_parsed=llm_parsed))
-    _save_last_results([r.path for r in final])
+    _render_results_table([(r.path, r.title, _highlight_snippet(r.snippet)) for r in results])
+    _console.print(_footer(len(results), mode.value, db_path, llm_parsed=llm_parsed))
+    _save_last_results([r.path for r in results])
 
 
 # ---------------------------------------------------------------------------
@@ -401,7 +350,7 @@ def status(
     table.add_column("key", style="dim")
     table.add_column("value")
     table.add_row("Documents", f"[bold]{count:,}[/bold]")
-    table.add_row("DB size", _human_size(db_path.stat().st_size))
+    table.add_row("DB size", _human_size(db_size_bytes(db_path)))
     table.add_row("Last indexed", last_str)
     table.add_row("DB path", str(db_path))
 

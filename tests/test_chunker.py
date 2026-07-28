@@ -2,7 +2,7 @@
 
 import pytest
 
-from oasis.index.chunker import _ENC, CHUNK_SIZE, OVERLAP, Chunk, chunk_document
+from oasis.index.chunker import CHUNK_SIZE, OVERLAP, Chunk, chunk_document, encoding
 
 # ---------------------------------------------------------------------------
 # Return type / shape
@@ -66,7 +66,7 @@ def test_single_chunk_text_roundtrips() -> None:
 def test_single_chunk_token_count_is_accurate() -> None:
     text = "the quick brown fox"
     chunks = chunk_document(text)
-    expected_tokens = len(_ENC.encode(text))
+    expected_tokens = len(encoding().encode(text))
     assert chunks[0].token_count == expected_tokens
 
 
@@ -74,7 +74,7 @@ def test_token_count_matches_text_length() -> None:
     text = "some arbitrary sentence for testing purposes"
     chunks = chunk_document(text)
     for chunk in chunks:
-        assert chunk.token_count == len(_ENC.encode(chunk.text))
+        assert chunk.token_count == len(encoding().encode(chunk.text))
 
 
 # ---------------------------------------------------------------------------
@@ -134,8 +134,8 @@ def test_consecutive_chunks_share_tokens() -> None:
     chunks = chunk_document(text, chunk_size=500, overlap=50)
     assert len(chunks) >= 2
 
-    tail_tokens = _ENC.encode(chunks[0].text)[-50:]
-    head_tokens = _ENC.encode(chunks[1].text)[:50]
+    tail_tokens = encoding().encode(chunks[0].text)[-50:]
+    head_tokens = encoding().encode(chunks[1].text)[:50]
     assert tail_tokens == head_tokens
 
 
@@ -144,8 +144,8 @@ def test_overlap_zero_partitions_token_sequence() -> None:
     chunks = chunk_document(text, chunk_size=500, overlap=0)
     assert len(chunks) == 2
     # With no overlap the chunks must partition the full token sequence exactly.
-    reconstructed = _ENC.encode(chunks[0].text) + _ENC.encode(chunks[1].text)
-    assert reconstructed == _ENC.encode(text)
+    reconstructed = encoding().encode(chunks[0].text) + encoding().encode(chunks[1].text)
+    assert reconstructed == encoding().encode(text)
 
 
 def test_full_reconstruction_with_overlap_removed() -> None:
@@ -154,11 +154,11 @@ def test_full_reconstruction_with_overlap_removed() -> None:
     overlap = 50
     chunks = chunk_document(text, chunk_size=500, overlap=overlap)
 
-    reconstructed: list[int] = _ENC.encode(chunks[0].text)
+    reconstructed: list[int] = encoding().encode(chunks[0].text)
     for chunk in chunks[1:]:
-        reconstructed += _ENC.encode(chunk.text)[overlap:]
+        reconstructed += encoding().encode(chunk.text)[overlap:]
 
-    assert reconstructed == _ENC.encode(text)
+    assert reconstructed == encoding().encode(text)
 
 
 # ---------------------------------------------------------------------------
@@ -201,8 +201,8 @@ def test_custom_overlap_reflected_in_shared_tokens() -> None:
     text = _text_of_n_tokens(500)
     chunks = chunk_document(text, chunk_size=200, overlap=20)
     assert len(chunks) >= 2
-    tail = _ENC.encode(chunks[0].text)[-20:]
-    head = _ENC.encode(chunks[1].text)[:20]
+    tail = encoding().encode(chunks[0].text)[-20:]
+    head = encoding().encode(chunks[1].text)[:20]
     assert tail == head
 
 

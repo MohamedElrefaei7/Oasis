@@ -373,6 +373,24 @@ struct IndexProgressView: View {
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
 
+            // The wedge, named at the moment it bites. Reindex is
+            // stop-and-report, so a root deleted from disk 400s and halts the
+            // refresh of every *other* folder — and the message the server
+            // sends ("Not a directory: …") describes the cause without hinting
+            // at the fix. Until step 8 there was no fix to hint at; now there
+            // is one, and this is the only screen where the user meets the
+            // problem.
+            if let root = viewModel.currentRoot,
+               !FileManager.default.fileExists(atPath: root) {
+                Label(
+                    "This folder no longer exists on disk. Remove it in Settings ▸ Folders (⌘,) to unblock Reindex.",
+                    systemImage: "folder.badge.questionmark"
+                )
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+
             // A failed sequence still did real work on earlier roots; showing it
             // is the difference between "nothing happened" and "two of three
             // folders were refreshed".

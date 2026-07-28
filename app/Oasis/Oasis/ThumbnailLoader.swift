@@ -18,9 +18,25 @@ final class ThumbnailLoader {
 
     private static let log = Logger(subsystem: "com.oasis.app", category: "thumbnails")
 
+    /// **`NSCache`, not a plain dictionary — Oasis is resident, not a session.**
+    ///
+    /// The app stays alive in the menu bar indefinitely (that is what makes the
+    /// global summon global), so a dictionary here grows for the life of the
+    /// *login session*: every result of every search, one decoded `NSImage`
+    /// each, never evicted. `NSCache` bounds it and, unlike a hand-rolled LRU,
+    /// also drops its contents under system memory pressure.
+    ///
     /// Keyed by path only: every card requests the same size, so size isn't
     /// part of the identity. Revisit if cards ever become resizable.
-    private var cache: [String: NSImage] = [:]
+    private let cache: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        // Generous next to a result grid (2 columns × a scrolling page) and far
+        // short of unbounded. Counted in entries, not bytes: these are all the
+        // same requested size, so entries are a fair proxy.
+        cache.countLimit = 512
+        return cache
+    }()
+
     /// De-duplicates concurrent requests for the same file — two cards (or a
     /// re-render mid-flight) await one generation instead of racing two.
     private var inFlight: [String: Task<NSImage, Never>] = [:]
@@ -28,7 +44,7 @@ final class ThumbnailLoader {
     private init() {}
 
     func thumbnail(for path: String, size: CGSize, scale: CGFloat) async -> NSImage {
-        if let cached = cache[path] { return cached }
+        if let cached = cache.object(forKey: path as NSString) { return cached }
         if let running = inFlight[path] { return await running.value }
 
         let task = Task { @MainActor () -> NSImage in
@@ -37,7 +53,7 @@ final class ThumbnailLoader {
         inFlight[path] = task
         let image = await task.value
         inFlight[path] = nil
-        cache[path] = image
+        cache.setObject(image, forKey: path as NSString)
         return image
     }
 

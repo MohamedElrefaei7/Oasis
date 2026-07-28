@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 
 from oasis.index.embeddings import EmbeddingModel
-from oasis.index.keyword import KeywordIndex
+from oasis.index.keyword import LIKE_ESCAPE, KeywordIndex, folder_like_pattern
 from oasis.index.vector import VectorIndex, VectorResult
 from oasis.query.parser import ParsedQuery
 
@@ -41,7 +41,7 @@ def _rrf(ranked_lists: list[list[str]]) -> dict[str, float]:
     return scores
 
 
-def _build_fts_query(parsed: ParsedQuery) -> str:
+def build_fts_query(parsed: ParsedQuery) -> str:
     """Combine semantic_query with keywords into an FTS5 query string.
 
     FTS5 treats space-separated terms as AND (all must match).  Multi-word
@@ -53,7 +53,7 @@ def _build_fts_query(parsed: ParsedQuery) -> str:
     return " ".join(parts)
 
 
-def _build_vec_where(parsed: ParsedQuery) -> str | None:
+def build_vec_where(parsed: ParsedQuery) -> str | None:
     """Build a LanceDB SQL WHERE clause from ParsedQuery filters."""
     parts: list[str] = []
 
@@ -71,15 +71,22 @@ def _build_vec_where(parsed: ParsedQuery) -> str | None:
     if parsed.folders:
         folder_conds: list[str] = []
         for folder in parsed.folders:
-            prefix = str(Path(folder).expanduser()).rstrip("/")
-            escaped = prefix.replace("'", "''")
-            folder_conds.append(f"path LIKE '{escaped}/%'")
+            prefix = str(Path(folder).expanduser())
+            # Two escapes, both needed and easy to conflate. The SQL-literal
+            # escape (doubling ') keeps the expression parseable; the LIKE
+            # escape (\% \_ \\) keeps a path that legitimately contains % or _
+            # from acting as a wildcard — a folder named `a_b` otherwise
+            # matches `axb`. folder_like_pattern does the second and appends
+            # the separator, so this arm and the keyword arm agree on what
+            # "under this folder" means.
+            pattern = folder_like_pattern(prefix).replace("'", "''")
+            folder_conds.append(f"path LIKE '{pattern}' ESCAPE '{LIKE_ESCAPE}'")
         parts.append(f"({' OR '.join(folder_conds)})")
 
     return " AND ".join(parts) if parts else None
 
 
-def _build_kw_filters(parsed: ParsedQuery) -> dict:
+def build_kw_filters(parsed: ParsedQuery) -> dict:
     """Extract structured filters suitable for KeywordIndex.search() kwargs."""
     filters: dict = {}
     if parsed.date_range:
@@ -121,9 +128,9 @@ def hybrid_search(
 
     Returns up to *top_n* documents ranked by fused score (descending).
     """
-    fts_query = _build_fts_query(parsed)
-    kw_filters = _build_kw_filters(parsed)
-    vec_where = _build_vec_where(parsed)
+    fts_query = build_fts_query(parsed)
+    kw_filters = build_kw_filters(parsed)
+    vec_where = build_vec_where(parsed)
 
     # 1. BM25 via FTS5 — one result per document, ordered best-first.
     kw_error: Exception | None = None

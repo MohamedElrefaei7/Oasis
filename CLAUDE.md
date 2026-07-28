@@ -11,14 +11,16 @@ A natural-language file search tool with hybrid keyword + semantic retrieval.
 - sentence-transformers (all-MiniLM-L6-v2) for embeddings
 - Ollama (local) for natural language query parsing — **local only**. The Anthropic API path was removed; `anthropic` is not a dependency and there is no `llm/claude.py`. Do not reintroduce a cloud provider: running entirely offline is a product requirement, not an implementation detail.
 - Typer + Rich for CLI
-- FastAPI for the local HTTP API (`oasis serve`) — **specced, not yet built**; see § HTTP API. The client is a native SwiftUI app that spawns the server as a child process. There is no web UI and no HTML routes; every endpoint returns JSON (or SSE).
+- FastAPI for the local HTTP API (`oasis serve`) — **built; every endpoint in § HTTP API is implemented.** The client is a native SwiftUI app (`app/Oasis/`) that spawns the server as a child process. There is no web UI and no HTML routes; every endpoint returns JSON (or SSE).
 - pytest for tests, ruff for lint/format
 
 ## Architecture
 - `src/oasis/extractors/` — one module per file format, uniform `Extractor` interface
 - `src/oasis/index/` — indexing pipeline, change detection, both index backends
-- `src/oasis/query/` — NL query parser, hybrid retrieval, reranking, score fusion
+- `src/oasis/query/` — NL query parser, hybrid retrieval, reranking, score fusion. **`query/search.py:run_search()` is the one search engine** — the CLI and the HTTP API both call it, neither has its own copy (they did until 2026-07-28, and the copies drifted).
 - `src/oasis/cli/` — Typer commands
+- `src/oasis/api/` — the FastAPI app behind `oasis serve`
+- `app/Oasis/` — the SwiftUI macOS app. **`OasisAPI.swift` is the one place that knows how to reach the server**; view models never build their own URLs or requests.
 - `tests/` — pytest, fixture files under `tests/fixtures/`
 
 ## Conventions
@@ -32,10 +34,12 @@ A natural-language file search tool with hybrid keyword + semantic retrieval.
 - Don't add async until there's a measured need.
 - Don't introduce new dependencies without checking if existing ones cover it.
 - Don't write to the database directly from CLI handlers — go through the index layer.
+- Don't build a second copy of something the other front-end already has. The CLI and the API share `run_search`; the Swift view models share `OasisAPI`; `/api/health` and `/api/status` share `IndexCapabilities`. Each of those was two copies once, and each pair had silently drifted before it was merged.
+- Don't filter paths with a bare SQL `LIKE 'prefix%'`. `_` and `%` are wildcards and are legal in filenames, and a prefix with no trailing separator matches sibling directories. Use `KeywordIndex.folder_like_pattern()` (with `ESCAPE`), or filter in Python like `docs_under`.
 
 ## HTTP API
 
-Spec for the `oasis serve` command — **not yet implemented**. Intended home: `src/oasis/api/` (`app.py`, `schemas.py`, `jobs.py`), mirroring the `cli/app.py` pattern. Response schemas are Pydantic models per the usual cross-boundary-data convention.
+The contract for the `oasis serve` command — **fully implemented** in `src/oasis/api/` (`app.py`, `schemas.py`, `state.py`, `jobs.py`, plus one module per endpoint group), mirroring the `cli/app.py` pattern. Response schemas are Pydantic models per the usual cross-boundary-data convention. Each endpoint below is annotated with where it landed.
 
 **The consumer is a native SwiftUI app that spawns this server as a child process and manages its lifetime.** That target — not a browser — drives every decision below. The server is a long-lived local service, not the CLI with a different transport, and the two differ in ways that matter:
 
@@ -202,7 +206,7 @@ Every other endpoint returns `503` while `status != "ready"`, rather than blocki
 | Param | Type | Default | Notes |
 |---|---|---|---|
 | `q` | `str` | required | raw query text |
-| `mode` | `"keyword" \| "semantic" \| "hybrid"` | `"hybrid"` | same `SearchMode` enum as the CLI |
+| `mode` | `"keyword" \| "semantic" \| "hybrid"` | `"hybrid"` | the `SearchMode` enum in `query/search.py` — literally the same one the CLI uses, since both front-ends call `run_search` |
 | `limit` | `int` | `10` | mirrors `DEFAULT_TOP_N` |
 | `raw` | `bool` | `false` | skip NL parsing, same as `--raw` |
 

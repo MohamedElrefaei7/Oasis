@@ -1,8 +1,10 @@
 """FastAPI application for `oasis serve`.
 
-Skeleton per CLAUDE.md § HTTP API: model lifecycle (background load + warm),
+Per CLAUDE.md § HTTP API: model lifecycle (background load + warm),
 /api/health, bearer-token auth, readiness gating, and the error envelope.
-Search/index/reset/open endpoints land in later commits on `protected_router`.
+Every other endpoint — status, search, open, index (+ SSE, cancel, remove-root)
+and reset — hangs off `protected_router`, so auth and readiness apply to all of
+them by construction rather than per route.
 """
 
 from __future__ import annotations
@@ -28,7 +30,6 @@ from oasis.api.search import router as search_router
 from oasis.api.state import AppState, get_conn
 from oasis.api.status import router as status_router
 from oasis.config import load_config
-from oasis.index.db import SCHEMA_VERSION
 from oasis.index.embeddings import SentenceTransformerEmbedder
 from oasis.index.keyword import KeywordIndex
 from oasis.index.vector import VectorIndex
@@ -238,21 +239,12 @@ def create_app(*, token: str, db_path: Path | None = None) -> FastAPI:
             )
 
         caps = KeywordIndex(get_conn(state.db_path)).get_capabilities()
-        # get_capabilities() is DB-only by design; the live embedder comparison
-        # belongs here, where the loaded model is known. Vectors built at a
-        # different dimension are unusable, so they don't count as ready.
+        # get_capabilities() is DB-only by design; the live-embedder comparison
+        # and the version math live on IndexCapabilities, so /api/status derives
+        # both from the same implementation instead of a second copy.
         live_dimension = state.embedder.dimension if state.embedder is not None else None
-        semantic_ready = (
-            caps.vectors_built
-            and caps.embedding_dimension is not None
-            and caps.embedding_dimension == live_dimension
-        )
-        # Derived here, not in the client — the app shouldn't do version math.
-        # The documents > 0 guard keeps a never-indexed DB reading as "index
-        # me" (reindex_recommended false), a different state from "reindex me".
-        reindex_recommended = caps.document_count > 0 and (
-            caps.schema_version < SCHEMA_VERSION or not semantic_ready
-        )
+        semantic_ready = caps.semantic_ready(live_dimension)
+        reindex_recommended = caps.reindex_recommended(live_dimension)
         return HealthResponse(
             status=state.status,
             version=version,

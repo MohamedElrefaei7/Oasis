@@ -53,10 +53,7 @@ final class DocumentOpener {
 
     init(controller: ServerController) {
         self.controller = controller
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 15
-        configuration.waitsForConnectivity = false
-        self.session = URLSession(configuration: configuration)
+        self.session = OasisAPI.session(timeout: 15)
     }
 
     func isOpening(_ result: SearchResult) -> Bool {
@@ -86,29 +83,19 @@ final class DocumentOpener {
             return
         }
 
-        var components = URLComponents()
-        components.scheme = "http"
-        components.host = "127.0.0.1"
-        components.port = handshake.port
-        components.path = "/api/open"
-
-        guard let url = components.url else {
-            failure = Failure(message: "Couldn't build the open URL.", path: path)
-            return
-        }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(handshake.token)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         // The path goes over as JSON, never interpolated into a URL: it can
         // contain anything a filename can, and the server matches the *exact*
         // stored form — any mangling here is a 404 on a file that exists.
-        request.httpBody = try? JSONEncoder().encode(["path": path])
+        guard let request = OasisAPI.request(
+            "/api/open", handshake: handshake, json: ["path": path]
+        ) else {
+            failure = Failure(message: "Couldn't build the open request.", path: path)
+            return
+        }
 
         do {
             let (data, response) = try await session.data(for: request)
-            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            let status = OasisAPI.statusCode(response)
 
             switch status {
             case 204:
@@ -132,7 +119,7 @@ final class DocumentOpener {
                 )
 
             default:
-                let detail = Self.decodeErrorMessage(from: data) ?? "the server returned HTTP \(status)."
+                let detail = OasisAPI.failureDetail(from: data, status: status)
                 Self.log.error("open failed (\(status)): \(detail, privacy: .public)")
                 failure = Failure(message: "Couldn't open this file — \(detail)", path: path)
             }
@@ -145,8 +132,4 @@ final class DocumentOpener {
         }
     }
 
-    /// The `{error: {code, message}}` envelope every endpoint uses.
-    private static func decodeErrorMessage(from data: Data) -> String? {
-        try? JSONDecoder().decode(ErrorResponse.self, from: data).error.message
-    }
 }

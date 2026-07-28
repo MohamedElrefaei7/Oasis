@@ -3,7 +3,8 @@ from pathlib import Path
 
 from pypdf import PdfReader
 
-from oasis.models import DocumentMetadata, ExtractedDocument
+from oasis.extractors.base import stat_metadata
+from oasis.models import ExtractedDocument
 
 logger = logging.getLogger(__name__)
 
@@ -36,17 +37,10 @@ class PdfExtractor:
             meta = reader.metadata
             title: str | None = (meta.title if meta and meta.title else None)
 
-            stat = path.stat()
             return ExtractedDocument(
                 path=path,
                 text=text,
-                metadata=DocumentMetadata(
-                    size_bytes=stat.st_size,
-                    mtime=stat.st_mtime,
-                    ctime=stat.st_ctime,
-                    page_count=page_count,
-                    title=title,
-                ),
+                metadata=stat_metadata(path, page_count=page_count, title=title),
             )
         except Exception:
             logger.warning("Failed to extract content from PDF %s", path, exc_info=True)

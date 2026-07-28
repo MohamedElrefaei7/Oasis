@@ -268,3 +268,64 @@ def test_search_no_filters_returns_all_matches(conn: sqlite3.Connection) -> None
     idx.upsert(_doc("/tmp/b.txt", text="searchterm", mtime=9000.0))
     results = idx.search("searchterm")
     assert len(results) == 2
+
+
+# ---------------------------------------------------------------------------
+# Folder filter — the two ways a naive LIKE prefix over-matches
+#
+# Both were live before 2026-07-28 and both are silent: the query returns
+# *more* rows, never an error, so a folder filter that quietly ignored its
+# boundary looked exactly like one that worked.
+# ---------------------------------------------------------------------------
+
+
+def test_search_folders_respects_separator_boundary(conn: sqlite3.Connection) -> None:
+    """`/tmp/a` must not match `/tmp/ab/…`.
+
+    A bare `LIKE 'prefix%'` says nothing about where the directory name ends,
+    so the sibling folder came back too. Same trap `docs_under` guards for
+    deletion; this is the query side of it.
+    """
+    idx = KeywordIndex(conn)
+    idx.upsert(_doc("/tmp/a/inside.txt", text="alpha"))
+    idx.upsert(_doc("/tmp/ab/sibling.txt", text="alpha"))
+
+    paths = [str(r.path) for r in idx.search("alpha", folders=["/tmp/a"])]
+    assert paths == ["/tmp/a/inside.txt"]
+
+
+def test_search_folders_escapes_like_wildcards(conn: sqlite3.Connection) -> None:
+    """A folder literally named `a_b` must not match `axb`.
+
+    `_` is a single-character wildcard to SQL LIKE and an entirely ordinary
+    character in a filename — the exact reason `docs_under` filters in Python.
+    This filter has to stay in SQL (it composes with the FTS5 MATCH), so it
+    escapes instead.
+    """
+    idx = KeywordIndex(conn)
+    idx.upsert(_doc("/tmp/a_b/real.txt", text="alpha"))
+    idx.upsert(_doc("/tmp/axb/decoy.txt", text="alpha"))
+
+    paths = [str(r.path) for r in idx.search("alpha", folders=["/tmp/a_b"])]
+    assert paths == ["/tmp/a_b/real.txt"]
+
+
+def test_search_folders_escapes_percent_in_path(conn: sqlite3.Connection) -> None:
+    """`%` is the multi-character wildcard, and is legal in a folder name."""
+    idx = KeywordIndex(conn)
+    idx.upsert(_doc("/tmp/100%/real.txt", text="alpha"))
+    idx.upsert(_doc("/tmp/100pct/decoy.txt", text="alpha"))
+
+    paths = [str(r.path) for r in idx.search("alpha", folders=["/tmp/100%"])]
+    assert paths == ["/tmp/100%/real.txt"]
+
+
+def test_search_folders_does_not_match_the_folder_itself(conn: sqlite3.Connection) -> None:
+    """The filter means "files under this directory", so a file whose whole
+    path *is* the prefix is not under it."""
+    idx = KeywordIndex(conn)
+    idx.upsert(_doc("/tmp/a", text="alpha"))
+    idx.upsert(_doc("/tmp/a/inside.txt", text="alpha"))
+
+    paths = [str(r.path) for r in idx.search("alpha", folders=["/tmp/a"])]
+    assert paths == ["/tmp/a/inside.txt"]

@@ -2,7 +2,8 @@ import csv
 import logging
 from pathlib import Path
 
-from oasis.models import DocumentMetadata, ExtractedDocument
+from oasis.extractors.base import stat_metadata
+from oasis.models import ExtractedDocument
 
 logger = logging.getLogger(__name__)
 
@@ -18,16 +19,7 @@ class CsvExtractor:
             return None
 
         try:
-            stat = path.stat()
-            return ExtractedDocument(
-                path=path,
-                text=text,
-                metadata=DocumentMetadata(
-                    size_bytes=stat.st_size,
-                    mtime=stat.st_mtime,
-                    ctime=stat.st_ctime,
-                ),
-            )
+            return ExtractedDocument(path=path, text=text, metadata=stat_metadata(path))
         except Exception:
             logger.warning("Failed to extract content from CSV %s", path, exc_info=True)
             return None
@@ -38,9 +30,7 @@ class CsvExtractor:
                 with path.open(newline="", encoding=encoding) as f:
                     reader = csv.reader(f)
                     lines = [
-                        "\t".join(cell for cell in row)
-                        for row in reader
-                        if any(cell.strip() for cell in row)
+                        "\t".join(row) for row in reader if any(cell.strip() for cell in row)
                     ]
                 return "\n".join(lines)
             except UnicodeDecodeError:

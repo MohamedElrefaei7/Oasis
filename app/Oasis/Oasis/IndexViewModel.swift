@@ -185,12 +185,9 @@ final class IndexViewModel {
         self.status = status
         self.runner = IndexRunner(controller: controller)
 
-        let configuration = URLSessionConfiguration.ephemeral
         // Reset is a local delete plus a LanceDB table rebuild — fast, but not
         // instant on a large index.
-        configuration.timeoutIntervalForRequest = 30
-        configuration.waitsForConnectivity = false
-        self.session = URLSession(configuration: configuration)
+        self.session = OasisAPI.session(timeout: 30)
     }
 
     // MARK: - Entry points
@@ -366,24 +363,19 @@ final class IndexViewModel {
 
     private func performReset() async {
         guard let handshake = controller.handshake,
-              let url = IndexRunner.endpoint(port: handshake.port, path: "/api/reset")
+              let request = OasisAPI.request(
+                  "/api/reset", handshake: handshake, json: ResetRequest(confirm: true)
+              )
         else {
             resetMessage = "The server isn't running."
             return
         }
 
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(handshake.token)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.cachePolicy = .reloadIgnoringLocalCacheData
-        request.httpBody = try? JSONEncoder().encode(ResetRequest(confirm: true))
-
         Self.log.notice("POST /api/reset")
 
         do {
             let (data, response) = try await session.data(for: request)
-            switch (response as? HTTPURLResponse)?.statusCode ?? 0 {
+            switch OasisAPI.statusCode(response) {
             case 204:
                 Self.log.notice("index reset — dropping to the empty state")
                 // Exactly the refresh the index flow does: health, status, and
@@ -395,7 +387,7 @@ final class IndexViewModel {
                 // Reset takes the same job lock as /api/index. The button is
                 // disabled while a job runs, so this is the defensive path —
                 // a job started from elsewhere, or a race with the disable.
-                let message = IndexRunner.errorMessage(from: data)
+                let message = OasisAPI.errorMessage(from: data)
                     ?? "An index is running — cancel or wait before resetting."
                 Self.log.error("reset refused (409): \(message, privacy: .public)")
                 resetMessage = message
@@ -411,7 +403,7 @@ final class IndexViewModel {
                 // Includes the 400 the server raises without confirm: true — a
                 // bug on this side if it ever appears, since the flag is always
                 // sent, so it is surfaced rather than swallowed.
-                let message = IndexRunner.errorMessage(from: data) ?? "the server returned HTTP \(status)."
+                let message = OasisAPI.failureDetail(from: data, status: status)
                 Self.log.error("reset failed (\(status)): \(message, privacy: .public)")
                 resetMessage = "Reset failed — \(message)"
             }

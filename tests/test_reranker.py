@@ -34,8 +34,24 @@ def _isolated_cache() -> None:
 
 
 def _fake_model(scores: list[float]) -> MagicMock:
+    """A CrossEncoder stand-in that returns **one score per pair**, like the real one.
+
+    It used to return a fixed-length array regardless of input, which meant a
+    3-score fake handed to a 1-result rerank was silently truncated by
+    `zip(strict=False)`. Since `rerank` now zips strictly (a short score array
+    would otherwise drop results with no error — the failure mode NaN logits
+    already produced once), the fake has to be honest about its length or it
+    tests a contract the real model doesn't have.
+    """
     m = MagicMock()
-    m.predict.return_value = np.array(scores, dtype=np.float32)
+
+    def predict(pairs, **_kwargs):
+        return np.array(
+            [scores[i % len(scores)] for i in range(len(pairs))] if scores else [],
+            dtype=np.float32,
+        )
+
+    m.predict.side_effect = predict
     return m
 
 
@@ -187,8 +203,8 @@ def test_rerank_returns_same_count_as_input_without_top_n(
     assert len(reranked) == 3
 
 
-def test_rerank_single_result(fake_ce: MagicMock) -> None:
-    fake_ce.predict.return_value = np.array([1.5], dtype=np.float32)
+def test_rerank_single_result() -> None:
+    fake_ce = _fake_model([1.5])
     with patch("oasis.query.reranker.CrossEncoder", return_value=fake_ce):
         r = CrossEncoderReranker()
     results = [_result("/a.txt")]

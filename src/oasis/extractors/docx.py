@@ -3,7 +3,8 @@ from pathlib import Path
 
 from docx import Document
 
-from oasis.models import DocumentMetadata, ExtractedDocument
+from oasis.extractors.base import stat_metadata
+from oasis.models import ExtractedDocument
 
 logger = logging.getLogger(__name__)
 
@@ -24,17 +25,10 @@ class DocxExtractor:
             title: str | None = props.title or None
             author: str | None = props.author or None
 
-            stat = path.stat()
             return ExtractedDocument(
                 path=path,
                 text=text,
-                metadata=DocumentMetadata(
-                    size_bytes=stat.st_size,
-                    mtime=stat.st_mtime,
-                    ctime=stat.st_ctime,
-                    title=title,
-                    author=author,
-                ),
+                metadata=stat_metadata(path, title=title, author=author),
             )
         except Exception:
             logger.warning("Failed to extract content from DOCX %s", path, exc_info=True)

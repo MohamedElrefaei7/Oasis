@@ -46,10 +46,7 @@ final class FoldersViewModel {
 
     init(coordinator: AppSearchCoordinator) {
         self.coordinator = coordinator
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 30
-        configuration.waitsForConnectivity = false
-        self.session = URLSession(configuration: configuration)
+        self.session = OasisAPI.session(timeout: 30)
     }
 
     func refresh() {
@@ -79,24 +76,19 @@ final class FoldersViewModel {
 
     private func performRemove(_ root: String) async {
         guard let handshake = controller.handshake,
-              let url = IndexRunner.endpoint(port: handshake.port, path: "/api/index/remove-root")
+              let request = OasisAPI.request(
+                  "/api/index/remove-root", handshake: handshake, json: RemoveRootRequest(root: root)
+              )
         else {
             message = "The server isn't running."
             return
         }
 
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(handshake.token)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.cachePolicy = .reloadIgnoringLocalCacheData
-        request.httpBody = try? JSONEncoder().encode(RemoveRootRequest(root: root))
-
         Self.log.notice("POST /api/index/remove-root \(root, privacy: .public)")
 
         do {
             let (data, response) = try await session.data(for: request)
-            switch (response as? HTTPURLResponse)?.statusCode ?? 0 {
+            switch OasisAPI.statusCode(response) {
             case 200:
                 let decoded = try? JSONDecoder().decode(RemoveRootResponse.self, from: data)
                 let removed = decoded?.removed ?? 0
@@ -115,12 +107,12 @@ final class FoldersViewModel {
                 // Shares the job lock with /api/index. The control is disabled
                 // while a job runs, so this is the defensive path — a job
                 // started elsewhere, or a race with the disable.
-                message = IndexRunner.errorMessage(from: data)
+                message = OasisAPI.errorMessage(from: data)
                     ?? "An index is running — cancel or wait before removing a folder."
                 Self.log.error("remove-root refused (409): \(self.message ?? "", privacy: .public)")
 
             case let httpStatus:
-                let detail = IndexRunner.errorMessage(from: data) ?? "the server returned HTTP \(httpStatus)."
+                let detail = OasisAPI.failureDetail(from: data, status: httpStatus)
                 Self.log.error("remove-root failed (\(httpStatus)): \(detail, privacy: .public)")
                 message = "Couldn't remove the folder — \(detail)"
             }

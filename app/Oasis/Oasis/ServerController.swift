@@ -314,19 +314,40 @@ final class ServerController {
 
     // MARK: - Health polling
 
-    private func pollHealth(port: Int, since: Date, generation gen: Int) async {
-        let url = URL(string: "http://127.0.0.1:\(port)/api/health")!
-        let configuration = URLSessionConfiguration.ephemeral
-        // Health answers instantly once the socket is up (uvicorn accepts
-        // connections long before the models finish); a short per-request
-        // timeout keeps polls from stacking. The 60 s default is the one
-        // APP_SEAM.md §3 warns about, and it applies to *requests*, never to
-        // how long we're willing to stay in `.warming`.
-        configuration.timeoutIntervalForRequest = 10
-        configuration.waitsForConnectivity = false
-        let session = URLSession(configuration: configuration)
-        let decoder = JSONDecoder()
+    /// One session for every health request, built once.
+    ///
+    /// Health answers instantly once the socket is up (uvicorn accepts
+    /// connections long before the models finish), so a short per-request
+    /// timeout keeps polls from stacking. The 60 s default is the one
+    /// APP_SEAM.md §3 warns about, and it applies to *requests* — never to how
+    /// long we are willing to stay in `.warming`, which is `readySoftTimeout`.
+    ///
+    /// Previously `refreshHealth()` constructed a fresh `URLSession` on every
+    /// call; each one carries its own connection pool and is never invalidated,
+    /// which is waste a menu-bar-resident app pays for the whole time it runs.
+    ///
+    /// `@ObservationIgnored` because nothing renders it — and because the
+    /// `@Observable` macro rewrites stored properties into computed ones, which
+    /// `lazy` cannot be applied to.
+    @ObservationIgnored private let healthSession = OasisAPI.session(timeout: 10)
 
+    /// Fetch and decode `/api/health`.
+    ///
+    /// The one route that takes **no** token (APP_SEAM.md §3) — it is what the
+    /// app polls before it can do anything else — so it is built from a bare
+    /// port rather than a handshake.
+    private func fetchHealth(port: Int) async throws -> HealthResponse {
+        guard let url = OasisAPI.url(port: port, path: "/api/health") else {
+            throw URLError(.badURL)
+        }
+        var request = URLRequest(url: url)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        let (data, _) = try await healthSession.data(for: request)
+        return try JSONDecoder().decode(HealthResponse.self, from: data)
+    }
+
+
+    private func pollHealth(port: Int, since: Date, generation gen: Int) async {
         let deadline = Date().addingTimeInterval(Self.readySoftTimeout)
         var poll = 0
 
@@ -335,11 +356,8 @@ final class ServerController {
             poll += 1
 
             do {
-                var request = URLRequest(url: url)
-                request.cachePolicy = .reloadIgnoringLocalCacheData
-                let (data, _) = try await session.data(for: request)
+                let health = try await fetchHealth(port: port)
                 guard gen == generation else { return }
-                let health = try decoder.decode(HealthResponse.self, from: data)
 
                 switch health.status {
                 case .loading:
@@ -399,19 +417,9 @@ final class ServerController {
         guard case .ready = state, let hs = handshake else { return }
         let gen = generation
 
-        let url = URL(string: "http://127.0.0.1:\(hs.port)/api/health")!
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 10
-        configuration.waitsForConnectivity = false
-        let session = URLSession(configuration: configuration)
-
-        var request = URLRequest(url: url)
-        request.cachePolicy = .reloadIgnoringLocalCacheData
-
         do {
-            let (data, _) = try await session.data(for: request)
+            let health = try await fetchHealth(port: hs.port)
             guard gen == generation, case .ready = state else { return }
-            let health = try JSONDecoder().decode(HealthResponse.self, from: data)
             guard health.status == .ready else { return }
             Self.log.notice(
                 "health refreshed — documents=\(health.documents.map(String.init) ?? "null", privacy: .public)"

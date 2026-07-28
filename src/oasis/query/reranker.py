@@ -71,8 +71,13 @@ class CrossEncoderReranker:
         raw = self._model.predict(pairs, show_progress_bar=False)
         scores = np.atleast_1d(np.asarray(raw, dtype=np.float32))
 
+        # strict=True: a scores array shorter than `results` would otherwise
+        # silently drop the tail — results vanishing from a search with no
+        # error anywhere, which is precisely the failure mode this model
+        # already produced once via NaN logits (oasis.device). If the model
+        # ever returns a wrong-length array, fail loudly.
         reranked = sorted(
-            (replace(r, score=float(s)) for r, s in zip(results, scores, strict=False)),
+            (replace(r, score=float(s)) for r, s in zip(results, scores, strict=True)),
             key=lambda r: r.score,
             reverse=True,
         )
