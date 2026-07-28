@@ -85,6 +85,12 @@ Last resynced against the repo: **2026-07-25** (930 tests, all passing, torch-fr
 
 ---
 
+## Repository shape
+
+**One branch: `master`, and the history is linear — zero merge commits, by construction.** Every arc so far (the pixi migration, the whole Swift app, the freeze spikes, the packaging steps) landed as ordinary commits on `master`; the one topic branch that ever existed, `app-wrapper-self-contained-bundle`, was fast-forwarded in and deleted on 2026-07-28 so the packaging work reads as one sequence rather than a side track. Local `master` and `Oasis/master` (GitHub) are kept identical.
+
+Regenerable artifacts are gitignored and must stay that way: `dist/` (the frozen server the build phase embeds), `spike/pybuild/` (PyInstaller's `--workpath`, rebuilt on every `--clean` freeze), `app/.build-release/` (xcodebuild derived data). What *is* tracked is the recipe — `spike/build.sh` and `spike/serve_entry.py` — never its output.
+
 ## Current State
 
 Phases 1–5.1 complete: extraction, keyword index, vector index, hybrid retrieval, NL query parsing, CLI, and the evaluation harness. Phase 5.2 (HTTP API): **all endpoints implemented** — skeleton/handshake/model-lifecycle/health/auth/error-envelope (2026-07-15), `GET /api/search` + `POST /api/open` + capability markers (2026-07-15), `GET /api/status` + `POST /api/index` + SSE + cancel (2026-07-16), stale reconciliation + no-vector backfill + job-bound cancel (2026-07-17), and **`POST /api/reset` (2026-07-17)**. The full `CLAUDE.md` § HTTP API contract is now built. **Phase 5.2 is closed** — tagged `service-layer-complete` (`734a84c`), the served retrieval path verified byte-identical to the direct eval harness, and the app spawn/handshake/readiness seam mapped + measured in `docs/APP_SEAM.md`. That doc is the entry point for the next phase, the native Swift app (Tier 1).
@@ -327,6 +333,8 @@ The jump is entirely from splitting `hybrid_search`'s try blocks (below). 10 of 
 ## Tests — 952, all passing
 
 Run with `pixi run -e dev pytest` (fast: 949 + 3 `slow` deselected) or `pixi run -e dev pytest -m ''` (all 952). Slow tests load real models on CPU.
+
+> **`FORCE_COLOR` / `COLUMNS` in the environment produce 8 false failures.** Every CLI test that asserts on output text (`'1 result' in result.output`, `'3 indexed'`, `'No result #5'`, …) breaks if Rich decides to emit ANSI into Click's `CliRunner` capture. `FORCE_COLOR` makes it colour a non-TTY, and `COLUMNS=0` makes it pick a degenerate width and wrap mid-assertion — the output then reads `'\x1b[?25l\x1b[32m⠋\x1b[0m \x1b[2mParsing query…'` and the substring is genuinely absent. Nothing is wrong with the code. Some terminals and agent harnesses export both, so a suite that is green in one shell is 8-red in another; measured 2026-07-28, where it briefly looked like a regression on `master`. Reproduce a clean run with `env -u FORCE_COLOR -u COLUMNS pixi run -e dev pytest`. (The durable fix, if this recurs, is to pin the terminal in the test fixture rather than to trust the ambient environment.)
 
 New 2026-07-25 (device + migration): `test_device.py` (11) — `resolve_device` precedence, `(model_name, device)` cache-key composition asserted without ever constructing an MPS context, and three `slow` tests that inspect the *loaded* model's real device rather than the string passed in. `test_cpu_cross_encoder_returns_finite_scores` is the ex-`xfail(strict=True)` tripwire on the realistic batch shape that Accelerate NaN'd.
 
