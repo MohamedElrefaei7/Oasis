@@ -1,10 +1,15 @@
 """Index endpoints: async, observable, cancellable indexing over HTTP.
 
-Three routes wrapping the existing ``index_directory`` pipeline:
+Four routes. Three wrap the existing ``index_directory`` pipeline; the fourth
+undoes it for one folder:
 
-- ``POST /api/index``        — start a background job (202) or 409 if one runs.
-- ``GET  /api/index/events`` — SSE stream: snapshot on connect, then live events.
-- ``POST /api/index/cancel`` — cooperatively cancel the running job (202/409).
+- ``POST /api/index``             — start a background job (202) or 409 if one runs.
+- ``GET  /api/index/events``      — SSE stream: snapshot on connect, then live events.
+- ``POST /api/index/cancel``      — cooperatively cancel the running job (202/409).
+- ``POST /api/index/remove-root`` — forget one indexed folder: delete its stored
+  documents and untrack the root (200/404/409). The recourse for a root deleted
+  from disk, which otherwise wedges Reindex forever. See Part D — it is
+  deliberately unconditional where the stale sweep is gated.
 
 This commit does *exactly* what ``index_directory`` already does (add + update)
 — it does **not** delete stale documents or backfill missing vectors. It only
@@ -28,6 +33,7 @@ import os
 import threading
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
@@ -41,8 +47,15 @@ from oasis.api.jobs import (
     snapshot_event,
     terminal_event,
 )
-from oasis.api.schemas import CancelRequest, IndexRequest, JobResponse
+from oasis.api.schemas import (
+    CancelRequest,
+    IndexRequest,
+    JobResponse,
+    RemoveRootRequest,
+    RemoveRootResponse,
+)
 from oasis.api.state import AppState, get_conn
+from oasis.index.keyword import KeywordIndex
 from oasis.index.pipeline import index_directory
 
 _log = logging.getLogger(__name__)
@@ -289,3 +302,89 @@ def cancel_index(request: Request, body: CancelRequest) -> JobResponse:
         )
     job.cancel.set()
     return JobResponse(job_id=job.id, status=job.status)
+
+
+# ---------------------------------------------------------------------------
+# Part D — remove-root
+# ---------------------------------------------------------------------------
+
+
+@router.post("/index/remove-root", response_model=RemoveRootResponse)
+def remove_root(request: Request, body: RemoveRootRequest) -> RemoveRootResponse:
+    """Forget one indexed folder: delete its documents, untrack the root.
+
+    **Why it exists.** ``indexed_roots`` was append-only, so a root deleted from
+    disk **wedges Reindex permanently** — the sequence 400s on the missing
+    directory and halts, and the only escape was ``/api/reset``, which is far
+    too blunt (wipe everything to drop one folder). This is the targeted
+    recourse, and it is the endpoint the app's Settings › Folders tab is built
+    on.
+
+    **It is UNCONDITIONAL, and that is the whole design.** The superficially
+    similar thing is the pipeline's stale sweep, which deletes stored docs the
+    walk didn't see and is therefore gated hard on a clean, complete census
+    (not cancelled, zero walk errors, zero permission denials) — because there,
+    "not seen" only means "deleted" if the walk could be trusted to have seen
+    everything. This endpoint answers a different question. It is *"forget this
+    folder"*, not *"reconcile this folder against disk"*: the user has already
+    decided. So it does **not walk** and has **no census gate**, and it must
+    not grow one — the wedge case it exists for is a root whose files are
+    *gone*, where a walk cannot succeed by definition. A census gate here would
+    make the endpoint fail in exactly the situation it was written for.
+    ``test_remove_root_when_directory_deleted_from_disk`` is the guard.
+
+    Shares the ``job_lock`` with ``/api/index`` and ``/api/reset``, held across
+    the whole operation, for the same reason they do: this mutates the index
+    (including through the shared ``VectorIndex`` handle the job writes) and
+    must not interleave with a running job.
+    """
+    state: AppState = request.app.state.oasis
+    assert state.db_path is not None  # ready implies loaded
+
+    # The same normalization storage uses (the pipeline abspaths its root once
+    # before recording it), so a client's spelling can't drift from the stored
+    # form. Lexical only — no resolve(), which would follow symlinks storage
+    # did not and reintroduce the mismatch.
+    root = os.path.abspath(body.root)
+
+    with state.job_lock:
+        job = state.index_job
+        if job is not None and job.status == "running":
+            raise StarletteHTTPException(
+                status_code=409,
+                detail={
+                    "code": "conflict",
+                    "message": (
+                        f"An index job is running (job_id={job.id}); "
+                        "cancel it before removing a folder."
+                    ),
+                },
+            )
+
+        idx = KeywordIndex(get_conn(state.db_path))
+        if root not in idx.get_indexed_roots():
+            raise StarletteHTTPException(
+                status_code=404,
+                detail={"code": "not_found", "message": f"Not an indexed folder: {root}"},
+            )
+
+        # Scoped delete, reusing the sweep's helper — docs_under does the
+        # separator-boundary check in Python precisely because SQL LIKE would
+        # treat a path's `_` as a wildcard, and a bare prefix match would put
+        # /tmp/ab under /tmp/a. Over-matching here deletes someone else's rows.
+        removed = 0
+        for doc_id, stored_path in idx.docs_under(root):
+            # Converge both stores per doc, vectors first then the documents row
+            # (whose _ad trigger cleans FTS) — the sweep's order. A doc left in
+            # one arm but gone from the other returns stale hits.
+            if state.vector_index is not None:
+                state.vector_index.delete_by_doc_id(doc_id)
+            idx.delete(Path(stored_path))
+            removed += 1
+
+        # Marker LAST. A crash with the rows gone but the root still listed
+        # leaves the operation retryable; the reverse orphans rows under a root
+        # the user can no longer name — the unrecoverable direction.
+        idx.remove_indexed_root(root)
+
+    return RemoveRootResponse(root=root, removed=removed)

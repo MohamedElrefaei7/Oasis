@@ -131,6 +131,7 @@ All routes are prefixed `/api`. Responses are `application/json` (except SSE); P
 | `POST` | `/api/index` | yes | `202` + `JobResponse` (or `409`) |
 | `GET` | `/api/index/events` | yes | `text/event-stream` |
 | `POST` | `/api/index/cancel` | yes | `202` (or `409`) |
+| `POST` | `/api/index/remove-root` | yes | `200` + `RemoveRootResponse` (or `404`/`409`) |
 | `POST` | `/api/reset` | yes | `204` |
 | `POST` | `/api/open` | yes | `204` |
 
@@ -330,6 +331,18 @@ data: {"type": "done", "job_id": "b1f4...", "stats": {"indexed": 812, "skipped":
 > **Cancel is bound to a `job_id` because a bodyless cancel loses a race auto-reindex will introduce on purpose.** Once FSEvents-driven reindexing exists (Tier-1 goal), a cancel tap aimed at job N can arrive *after* N finished and N+1 auto-started; "cancel whatever is running" would silently kill N+1. The client already holds the id from the `202`, so requiring it costs nothing. A mismatched id must never touch the running job's cancel event. `409` (not `404`) keeps "job-state conflict" as one status code across start and cancel; the body only sharpens its meaning to "that job is not the one running".
 
 > **Pipeline support for this is already in place** — `index_directory()` takes `cancel: threading.Event | None = None` and checks it in the per-file loop and between embed batches, returning partial stats. Committed work stays committed; indexing is incremental, so the next run resumes where the cancelled one stopped.
+
+#### `POST /api/index/remove-root` — **implemented (`api/index.py`, 2026-07-27)**
+```jsonc
+{ "root": "/Users/you/Documents/old-project" }   // required
+```
+`200` `{"root": "<abspath>", "removed": 12}` on success — the root is echoed in its **abspath'd** form (the server normalizes before matching, the same lexical `abspath` storage uses; no `resolve()`), and `removed` is the document count deleted. `404` if `root` isn't in `indexed_roots` — matching is **exact, never prefix-based**, so a *subdirectory* of a tracked root is also a `404`, not a partial delete of its parent. `409` if an index job is running: remove-root takes the **same `job_lock`** as `/api/index` and `/api/reset`, held across the whole operation, because it mutates the index through the shared `VectorIndex` handle a running job writes through.
+
+**Why it exists: `indexed_roots` was append-only, and that wedges Reindex permanently.** Reindex is stop-and-report (a failing root ends the sequence), so a root the user deleted from disk `400`s and halts the refresh of *every other* folder — with no recourse but `/api/reset`, which wipes everything to drop one folder. This endpoint is the targeted recourse and the thing Settings › Folders is built on.
+
+**It is UNCONDITIONAL, and that is the design, not an oversight.** The superficially similar operation is the pipeline's stale sweep, which is gated hard on a clean complete census (not cancelled, zero walk errors, zero permission denials) because there "not seen on disk" only means "deleted" if the walk can be trusted. remove-root answers a different question — *"forget this folder"*, not *"reconcile this folder against disk"* — so it does **not walk** and has **no census gate**, and must never grow one: the wedge case it exists for is a root whose files are *gone*, where a walk cannot succeed by definition. A census gate here would make the endpoint fail in precisely the situation it was written for. `test_remove_root_when_directory_deleted_from_disk` is the guard.
+
+**Deletion mechanics.** Scoped via `KeywordIndex.docs_under(root)` — the sweep's helper, which does the separator-boundary check **in Python, not SQL `LIKE`**: a path's `_` is a single-char wildcard to `LIKE`, and a bare prefix match puts `/tmp/ab` under `/tmp/a`. Per doc, both stores converge in the sweep's order — vectors (`delete_by_doc_id`) then the `documents` row (whose `_ad` trigger cleans FTS) — since a doc live in one arm and gone from the other returns stale hits. The root marker is dropped **last** (`KeywordIndex.remove_indexed_root`): a crash with rows gone but the root still listed leaves the operation retryable, while the reverse orphans rows under a root the user can no longer name. `removed: 0` for a tracked root whose docs were already swept is a success — the untracking is the point.
 
 #### `POST /api/reset` — **implemented (`api/reset.py`, `AppState.reset_index`, 2026-07-17)**
 ```jsonc

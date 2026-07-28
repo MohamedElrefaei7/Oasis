@@ -303,6 +303,28 @@ class KeywordIndex:
         roots.append(root)
         self.set_meta("indexed_roots", json.dumps(roots))
 
+    def remove_indexed_root(self, root: str) -> bool:
+        """Untrack *root*; return whether it was there. Idempotent.
+
+        Until this existed ``indexed_roots`` only ever grew, which is what makes
+        a root deleted from disk wedge Reindex permanently — the sequence 400s
+        on the missing root and there is no way to drop it short of a full
+        reset. *root* must be the abspath form ``add_indexed_root`` stored;
+        matching is exact, never prefix-based (see ``docs_under``).
+
+        Deleting the root's documents is the caller's job, not this method's:
+        the two are separate steps so the caller can order them
+        documents-then-marker, which is the crash-recoverable order — a crash
+        with rows gone but the root still listed leaves the operation
+        retryable, whereas the reverse orphans rows under a root nobody can
+        name anymore.
+        """
+        roots = self.get_indexed_roots()
+        if root not in roots:
+            return False
+        self.set_meta("indexed_roots", json.dumps([r for r in roots if r != root]))
+        return True
+
     # ------------------------------------------------------------------
     # Internal helpers (used by the pipeline)
     # ------------------------------------------------------------------

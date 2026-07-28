@@ -232,6 +232,27 @@ class CancelRequest(ApiModel):
     job_id: str
 
 
+class RemoveRootRequest(ApiModel):
+    """Body of POST /api/index/remove-root — "forget this folder"."""
+
+    root: str
+
+
+class RemoveRootResponse(ApiModel):
+    """200 body for POST /api/index/remove-root.
+
+    ``root`` is echoed in its **abspath'd** form (the server normalizes before
+    matching), so the client can tell which stored root it actually hit rather
+    than assuming its own spelling was the one on file. ``removed`` is the
+    document count deleted — it can legitimately be 0 for a tracked root whose
+    documents were already swept away, which is still a success: the root got
+    untracked, which is the point.
+    """
+
+    root: str
+    removed: int
+
+
 # ---------------------------------------------------------------------------
 # SSE events (GET /api/index/events)
 #
