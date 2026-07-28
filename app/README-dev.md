@@ -32,10 +32,50 @@ binary then lives at `.pixi/envs/default/bin/oasis` — **note the path changed
 with the pixi migration (2026-07-25)**; a scheme still pointing at the old
 `.venv/bin/oasis` will fail with `.failed`, naming the stale path.
 
-> **Release note.** The shipped app will spawn the PyInstaller `oasis` binary
-> bundled inside the `.app` instead (`APP_SEAM.md` §1). That branch is marked
-> with a `RELEASE TODO` in `ServerController.resolveServerBinary()` and is
-> deliberately not implemented yet.
+`OASIS_SERVE_BIN` is the **fallback**, not the first choice —
+`resolveServerBinary()` prefers a server embedded in the bundle and only reads
+the environment when there isn't one. That ordering is what keeps a shipped
+`.app` from ever falling through to a dev machine's environment, and it costs
+the dev loop nothing because the embed build phase skips Debug (below).
+
+## Release: the embedded server
+
+A Release build is self-contained — it carries its own frozen server and spawns
+that, with no pixi environment anywhere in the picture.
+
+```sh
+bash spike/build.sh                                   # from the repo root, once
+xcodebuild -project app/Oasis/Oasis.xcodeproj -scheme Oasis -configuration Release build
+```
+
+- **`spike/build.sh`** is the recorded PyInstaller `--onedir` recipe. It writes
+  `dist/serve_entry/` (~1.1 GB: the `serve_entry` executable plus the
+  `_internal/` directory it resolves dylibs and data against). `dist/` is
+  gitignored and stays that way — the build phase references the output, it is
+  never committed.
+- **The `Embed Frozen Server` build phase** (`app/Oasis/Scripts/embed_server.sh`)
+  `rsync`s that directory into `Oasis.app/Contents/Resources/serve_entry/`.
+  `ServerController` resolves `Bundle.main.resourceURL` + `serve_entry/serve_entry`
+  and spawns it — **not** `url(forAuxiliaryExecutable:)`, whose search path is
+  the flat `Contents/MacOS/`, which has no room for `_internal/`.
+- **It does not re-freeze, and it skips Debug.** Freezing is minutes and a
+  gigabyte; doing it per build would make ⌘R unusable, and embedding in Debug
+  would silently stop honouring `OASIS_SERVE_BIN`. Set `OASIS_EMBED_SERVER=1` to
+  embed in Debug anyway. Re-freeze by hand whenever the Python side changes —
+  automating that (on a source hash, not unconditionally) is a later step.
+- **`ENABLE_USER_SCRIPT_SANDBOXING = NO`** on the target, because the phase reads
+  `dist/` at the repo root, outside the build directory.
+
+The spawn is **bare** — `child.environment` is never set, so the child simply
+inherits. The frozen binary needs no activation: PyInstaller relocated every
+dylib via rpath into `_internal/`, which the spike proved by running it under
+`env -i`. That environment-independence is the whole payoff of freezing, and it
+is what the pixi binary never had.
+
+> **Not yet in the bundle: the model weights.** The embedded server loads
+> `all-MiniLM-L6-v2` and the cross-encoder from this machine's HuggingFace cache,
+> and `HF_HUB_OFFLINE` is deliberately *not* set. Bundling weights, ad-hoc
+> signing, the `libtorch_cpu.dylib` dedup, and the DMG are each their own step.
 
 ## What you should see
 

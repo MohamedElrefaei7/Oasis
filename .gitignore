@@ -238,3 +238,10 @@ eval/results/run.log
 
 # pixi
 .pixi/
+
+# PyInstaller work directory for the frozen server (spike/build.sh --workpath).
+# 298 MB of regenerable intermediates, including a full copy of the 88 MB
+# executable — it was committed by accident and re-freezing churns all of it.
+# The recipe (spike/build.sh, spike/serve_entry.py) is what's worth keeping;
+# its output is not, same rule as dist/.
+spike/pybuild/

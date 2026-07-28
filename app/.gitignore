@@ -25,3 +25,6 @@ DerivedData/
 
 ## macOS
 .DS_Store
+
+## Local release build output (xcodebuild -derivedDataPath)
+.build-release/

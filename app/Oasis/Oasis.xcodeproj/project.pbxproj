@@ -60,6 +60,7 @@
 				4835130D301494A0005D451E /* Sources */,
 				4835130E301494A0005D451E /* Frameworks */,
 				4835130F301494A0005D451E /* Resources */,
+				48B1C00130400A00005D451E /* Embed Frozen Server */,
 			);
 			buildRules = (
 			);
@@ -122,6 +123,24 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		48B1C00130400A00005D451E /* Embed Frozen Server */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+			);
+			name = "Embed Frozen Server";
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/bash;
+			shellScript = "\"${SRCROOT}/Scripts/embed_server.sh\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		4835130D301494A0005D451E /* Sources */ = {
@@ -257,8 +276,12 @@
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSDesktopFolderUsageDescription = "Oasis indexes the folders you choose so you can find files by describing them. Everything stays on this Mac.";
+				INFOPLIST_KEY_NSDocumentsFolderUsageDescription = "Oasis indexes the folders you choose so you can find files by describing them. Everything stays on this Mac.";
+				INFOPLIST_KEY_NSDownloadsFolderUsageDescription = "Oasis indexes the folders you choose so you can find files by describing them. Everything stays on this Mac.";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
@@ -299,8 +322,12 @@
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSDesktopFolderUsageDescription = "Oasis indexes the folders you choose so you can find files by describing them. Everything stays on this Mac.";
+				INFOPLIST_KEY_NSDocumentsFolderUsageDescription = "Oasis indexes the folders you choose so you can find files by describing them. Everything stays on this Mac.";
+				INFOPLIST_KEY_NSDownloadsFolderUsageDescription = "Oasis indexes the folders you choose so you can find files by describing them. Everything stays on this Mac.";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;

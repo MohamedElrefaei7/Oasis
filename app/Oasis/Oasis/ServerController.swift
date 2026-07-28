@@ -70,6 +70,17 @@ final class ServerController {
     /// The environment variable that names the server binary in dev runs.
     private static let binaryEnvVar = "OASIS_SERVE_BIN"
 
+    /// Where `Scripts/embed_server.sh` puts the frozen server inside the `.app`,
+    /// relative to `Contents/Resources/`.
+    ///
+    /// PyInstaller `--onedir` output is a *directory*: the executable with an
+    /// `_internal/` sibling it resolves its dylibs and data against. The whole
+    /// directory is copied, and the binary is addressed through it — which is
+    /// also why this isn't `Bundle.main.url(forAuxiliaryExecutable:)`, whose
+    /// search path is `Contents/MacOS/`, a flat directory with no room for
+    /// `_internal/`.
+    private static let bundledServerPath = "serve_entry/serve_entry"
+
     private static let log = Logger(subsystem: "com.oasis.app", category: "server")
 
     // MARK: - Private state
@@ -160,6 +171,16 @@ final class ServerController {
         // `--managed` arms the server's parent-death watchdog (APP_SEAM.md §5).
         // It is load-bearing for teardown — see `terminateChild()`.
         child.arguments = ["serve", "--managed"]
+        // `child.environment` is deliberately left alone: inherit, stage nothing.
+        //
+        // The frozen server is self-contained — PyInstaller relocated every
+        // dylib via rpath into `_internal/`, and the spike ran it under `env -i`
+        // — so it needs no pixi activation, no `CONDA_PREFIX`, and no
+        // library-path staging. That independence is the entire payoff of
+        // freezing, and the reason this line is a comment instead of code: the
+        // pixi binary it replaces needed an activated environment, which is what
+        // bit the spawn repeatedly. Inheriting still hands over `HOME`, which is
+        // how the server finds `~/.oasis/index.db` and the model cache.
         child.standardOutput = stdoutPipe
         child.standardError = stderrPipe
         child.terminationHandler = { [weak self] proc in
@@ -175,7 +196,14 @@ final class ServerController {
             return
         }
         process = child
-        Self.log.notice("spawned \(binary.path, privacy: .public) serve --managed (pid \(child.processIdentifier))")
+        // `.public` on the path on purpose: which binary got spawned — the
+        // bundle's frozen server or a dev machine's pixi one — is the first
+        // thing to check when a Release build misbehaves, and os_log redacts
+        // interpolated strings by default.
+        let source = Self.bundledServerBinary() == nil ? "dev/\(Self.binaryEnvVar)" : "bundled"
+        Self.log.notice(
+            "spawned [\(source, privacy: .public)] \(binary.path, privacy: .public) serve --managed (pid \(child.processIdentifier))"
+        )
 
         // 3. Drain BOTH pipes, continuously.
         //
@@ -222,25 +250,36 @@ final class ServerController {
 
     // MARK: - Binary resolution
 
+    /// Bundled first, environment second — never `$PATH`.
+    ///
+    /// **Bundled wins because a shipped `.app` must not be able to fall through
+    /// to a dev machine's environment.** A Release build carries its own server
+    /// (`Scripts/embed_server.sh`), so it is self-contained; the env var is the
+    /// dev path, and it stays reachable precisely because the embed phase skips
+    /// Debug builds — a ⌘R keeps spawning the pixi binary, with no re-freeze per
+    /// iteration.
     private static func resolveServerBinary() -> BinaryResolution {
-        // RELEASE TODO — the shipped app spawns the PyInstaller `oasis` binary
-        // bundled inside the .app (APP_SEAM.md §1), resolved off `Bundle.main`
-        // rather than the environment. Deliberately not implemented yet; this
-        // step only needs the dev path.
-        //
-        //     if let bundled = Bundle.main.url(forAuxiliaryExecutable: "oasis") { return .found(bundled) }
+        // 1. The frozen server inside the bundle (APP_SEAM.md §1).
+        if let bundled = bundledServerBinary() {
+            return .found(bundled)
+        }
 
+        // 2. Dev: whatever the scheme points at.
         guard let path = ProcessInfo.processInfo.environment[binaryEnvVar], !path.isEmpty else {
             return .missing("""
-                \(binaryEnvVar) is not set.
+                No server binary. This build has none embedded, and \(binaryEnvVar) is not set.
 
-                Point it at the `oasis` binary to run (Product ▸ Scheme ▸ Edit Scheme… \
+                For a dev run, point it at the `oasis` binary (Product ▸ Scheme ▸ Edit Scheme… \
                 ▸ Run ▸ Arguments ▸ Environment Variables), e.g. \
                 /path/to/oasis/.pixi/envs/default/bin/oasis — see app/README-dev.md.
 
                 It must be the pixi env's binary. A `.venv/bin/oasis` from before \
                 the pixi migration runs Homebrew Python against a PyPI torch, whose \
                 Accelerate BLAS SIGBUSes during model warmup.
+
+                For a Release build, freeze the server first (`bash spike/build.sh` \
+                from the repo root) so the Embed Frozen Server build phase has \
+                something to copy.
                 """)
         }
 
@@ -252,6 +291,15 @@ final class ServerController {
             return .missing("\(binaryEnvVar) points at \(url.path), which doesn't exist or isn't executable.")
         }
         return .found(url)
+    }
+
+    /// The embedded frozen server, or `nil` if this build has none (every Debug
+    /// build, and a Release build made before the server was frozen).
+    private static func bundledServerBinary() -> URL? {
+        guard let resources = Bundle.main.resourceURL else { return nil }
+        let url = resources.appendingPathComponent(bundledServerPath)
+        guard FileManager.default.isExecutableFile(atPath: url.path) else { return nil }
+        return url
     }
 
     // MARK: - Handshake
