@@ -32,6 +32,17 @@ final class AppSearchCoordinator {
     /// query typed into the panel is still there when the window comes back.
     let search: SearchViewModel
 
+    /// The one `/api/status` reader in the process.
+    ///
+    /// It was already shared between the statistics panel and the roots Reindex
+    /// re-scans, on the grounds that those two must never disagree. Settings ▸
+    /// Folders is the third reader of the same list *and the only writer* — it
+    /// is what removes a root — so it hoisted from `ContentView`'s `@State` to
+    /// here. Two instances would let the folder list the user just edited and
+    /// the folder list on the main window drift apart, and the main window is
+    /// often on screen behind Settings while it happens.
+    let status: StatusViewModel
+
     /// A query accepted while the server was still warming.
     ///
     /// Part D's whole point is that the hotkey works with no window open, and
@@ -50,6 +61,7 @@ final class AppSearchCoordinator {
     init(controller: ServerController) {
         self.controller = controller
         self.search = SearchViewModel(controller: controller)
+        self.status = StatusViewModel(controller: controller)
     }
 
     // MARK: - Window plumbing

@@ -35,6 +35,15 @@ struct OasisApp: App {
         } label: {
             MenuBarLabel(coordinator: appDelegate.coordinator)
         }
+
+        // The `Settings` scene, not a second `Window`. This is what gives Oasis
+        // the standard **⌘, / Oasis ▸ Settings…** menu item and the singleton
+        // preferences window, both for free and both hard to get right by hand.
+        // It takes the coordinator because Settings ▸ Folders reads and writes
+        // the same `/api/status` the main window's statistics panel reads.
+        Settings {
+            SettingsView(coordinator: appDelegate.coordinator)
+        }
     }
 }
 

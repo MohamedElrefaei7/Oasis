@@ -54,8 +54,16 @@ final class SearchViewModel {
     /// treats as "run the search" rather than "open something".
     private(set) var selectedIndex: Int?
 
-    /// Sketch max, and what `limit` is pinned to.
-    static let resultLimit = 8
+    /// How many results to ask the server for — a preference now (Settings ▸
+    /// General), not the pinned 8 the sketch shipped with.
+    ///
+    /// Read from `UserDefaults` **per search**, deliberately: a value captured
+    /// at init would need observation plumbing between Settings and here to
+    /// stay current, and the whole point is that changing it applies to the
+    /// next search rather than the next launch. `ResultLimit.current` owns the
+    /// clamping — notably the absent-key case, where `integer(forKey:)` returns
+    /// 0 and would otherwise ask for zero results.
+    private var resultLimit: Int { ResultLimit.current }
 
     private static let log = Logger(subsystem: "com.oasis.app", category: "search")
 
@@ -249,7 +257,7 @@ final class SearchViewModel {
         components.queryItems = [
             URLQueryItem(name: "q", value: trimmed),
             URLQueryItem(name: "mode", value: "hybrid"),
-            URLQueryItem(name: "limit", value: String(Self.resultLimit)),
+            URLQueryItem(name: "limit", value: String(resultLimit)),
             // The eval-measured best path and the endpoint's own default: NL
             // parsing costs −0.108 ndcg@10. Don't ask for a parse.
             URLQueryItem(name: "raw", value: "true"),

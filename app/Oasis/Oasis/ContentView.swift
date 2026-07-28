@@ -16,7 +16,6 @@ struct ContentView: View {
     @Environment(\.openWindow) private var openWindow
 
     @State private var indexViewModel: IndexViewModel
-    @State private var statusViewModel: StatusViewModel
     /// Window-scoped, unlike the search state: opening a file is something you
     /// do *to* a result on screen, so it has nothing to outlive the window for.
     @State private var opener: DocumentOpener
@@ -27,15 +26,17 @@ struct ContentView: View {
     /// window-scoped search state would be recreated (and the panel's query
     /// lost) every time the window is closed and reopened.
     private var viewModel: SearchViewModel { coordinator.search }
+    /// One `/api/status` reader, shared: it feeds the statistics panel, the
+    /// roots Reindex re-scans, and Settings ▸ Folders, which must never
+    /// disagree. App-level rather than `@State` since Settings outlives this
+    /// window too — see `AppSearchCoordinator.status`.
+    private var statusViewModel: StatusViewModel { coordinator.status }
 
     init(coordinator: AppSearchCoordinator) {
         self.coordinator = coordinator
-        // One `/api/status` reader, shared: it feeds the statistics panel and
-        // the roots Reindex re-scans, and those must never disagree. Both stay
-        // window-scoped — neither is touched by the summon hand-off.
-        let status = StatusViewModel(controller: coordinator.controller)
-        _statusViewModel = State(initialValue: status)
-        _indexViewModel = State(initialValue: IndexViewModel(controller: coordinator.controller, status: status))
+        _indexViewModel = State(
+            initialValue: IndexViewModel(controller: coordinator.controller, status: coordinator.status)
+        )
         _opener = State(initialValue: DocumentOpener(controller: coordinator.controller))
     }
 
@@ -427,10 +428,9 @@ struct ContentView: View {
 /// The sketch's right-hand rail: an action pair on top, the statistics panel in
 /// the middle, a second pair at the bottom.
 ///
-/// **Both index actions and the statistics panel are live; Reset and Settings
-/// are still inert.** Those two are real, positioned, styled buttons so the
-/// window is the true shape, but their actions are no-ops pending their own
-/// steps.
+/// **Every control is live.** Settings was the last inert one; it now opens the
+/// `Settings` scene through a `SettingsLink`, styled to match the rail's
+/// buttons.
 private struct ControlRail: View {
     let status: StatusViewModel
     /// The index reports at least one root, so there is something to re-scan.
@@ -520,9 +520,17 @@ private struct ControlRail: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
-                RailButton(title: "Settings", systemImage: "gearshape") {
-                    // TODO: later step — settings window.
+                // `SettingsLink`, not a Button that pokes at NSApp. It is the
+                // supported way to open the `Settings` scene, and it opens the
+                // *same* window ⌘, does — a hand-rolled
+                // `sendAction(showSettingsWindow:)` depends on an undocumented
+                // selector that has already been renamed once across releases.
+                SettingsLink {
+                    Label("Settings", systemImage: "gearshape")
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
             }
             // A real confirmation that names the stakes. Reset is irreversible
             // and there is no undo, so the dialog says what goes and what it
