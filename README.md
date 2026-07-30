@@ -4,7 +4,9 @@
 
 Oasis is a natural-language file search system that runs entirely on your machine. Ask it the way you'd ask a person, like — *"that tax PDF from last spring"*, *"powerpoints I made about ML last month"*, or *"the spreadsheet with Q3 revenue"* — and it finds the right file for you.
 
-Oasis works by parsing your query into structured filters, running hybrid keyword and semantic retrieval, reranking the candidates with a cross-encoder, and returning ranked results, all locally, and in under a second.
+Oasis works by running hybrid keyword and semantic retrieval over the *contents* of your files, fusing the two rankings, and reranking the survivors with a cross-encoder. Everything happens locally.
+
+It ships as three things over one engine: a **CLI**, a **loopback HTTP service**, and a **native macOS app**.
 
 ---
 
@@ -14,24 +16,62 @@ Most built-in OS search indexes shallowly and ranks poorly. `grep` can't help wh
 
 ---
 
-## Quick startup guide
+## Where the project actually is
+
+| Piece | State |
+|---|---|
+| Extraction, keyword index, vector index, hybrid retrieval + rerank | **Done**, measured, 952 tests |
+| Evaluation harness (`eval/`) | **Done** — 300-file labeled corpus, 83 queries, reproducible matrix |
+| Natural-language query parsing | **Built, and disabled by default** — the eval measured it as a **−0.108 ndcg@10 regression**. See [Measured results](#measured-results) |
+| Local HTTP API (`oasis serve`) | **Done** — every endpoint implemented, served rankings verified byte-identical to the eval harness |
+| Native macOS app (SwiftUI) | **Feature-complete** — search, indexing, stats, reset, ⌘⌥O summon panel, menu-bar residency, Settings. Every control is live |
+| Packaging | **In progress** — a Release `.app` is self-contained and works offline on a cold machine (11.63 s to ready, 1.3 GB). **Not yet signed, notarized, or distributable** |
+
+There is **no download yet**. Running Oasis today means building it from this repo.
+
+---
+
+## Quick startup guide (CLI)
 
 ```bash
 git clone https://github.com/MohamedElrefaei7/Oasis.git
-cd oasis
+cd Oasis
 pixi install
 
 # Index a folder (incremental — re-runs skip unchanged files)
 pixi run oasis index ~/Documents
 
 # Search in plain English (examples)
-pixi run oasis search "tax pdf from last spring"
-pixi run oasis search "powerpoints about machine learning last month"
-pixi run oasis search "spreadsheet with quarterly revenue"
+pixi run oasis search --raw "tax pdf from last spring"
+pixi run oasis search --raw "powerpoints about machine learning last month"
+pixi run oasis search --raw "spreadsheet with quarterly revenue"
 
 # Directly open result #2 from the last search
 pixi run oasis open 2
 ```
+
+`--raw` skips the LLM parsing layer, and it is **the best-measured configuration** — see [Measured results](#measured-results). The HTTP API and the macOS app already default to it; the CLI still parses unless you pass the flag.
+
+---
+
+## The macOS app
+
+The app is the actual deliverable; the CLI proves the engine. It spawns `oasis serve --managed` as a child process, reads a one-line JSON handshake off its stdout, polls `/api/health` until the models are warm, and tears the child down on quit. The retrieval code is never re-implemented — one engine, three front-ends.
+
+What works today, live:
+
+- **Search** over `/api/search` into a result grid, with highlighted snippets and thumbnails.
+- **A Spotlight-style summon** — a global **⌘⌥O** pops a borderless floating panel over whatever you're in, on the current Space. Type, arrow, Return. The app is menu-bar resident, so closing the window doesn't quit it.
+- **Open results in their real app** by click or by keyboard, without ever leaving the query line.
+- **Index New Folder** — `NSOpenPanel` → `POST /api/index` → live SSE progress with cancel → terminal summary.
+- **Reindex Current Folders**, sequentially over every known root, surfacing the stale-reconciliation sweep's removal count.
+- **Indexed File Statistics** — real counts, index size, last-indexed, semantic-search readiness, the folder list, and worded "you should reindex" nudges.
+- **Reset Indexing** behind a destructive confirm that names the document count.
+- **Settings** (⌘,) — General / Folders / Shortcuts / About: launch-at-login, results-count preference, reveal-index-in-Finder, a Full Disk Access explainer, hotkey rebinding, and add/remove indexed folders.
+
+Building it: open `app/Oasis/Oasis.xcodeproj` and Run. Dev builds spawn the server from `OASIS_SERVE_BIN` (already set in the committed scheme); Release builds embed a frozen server and spawn *that*. Setup lives in [`app/README-dev.md`](app/README-dev.md), and the spawn/handshake/readiness contract is specified in [`docs/APP_SEAM.md`](docs/APP_SEAM.md).
+
+**Packaging status, honestly.** A Release `.app` embeds the PyInstaller-frozen server, both models, and the tiktoken encoding in `Contents/Resources/`, and runs entirely from inside the bundle. Verified the only way it can be — HuggingFace / tiktoken / torch caches moved aside, **Wi-Fi off**, launched by Finder double-click: **11.63 s cold to ready** (1.73 s handshake, 4.14 s model warming), 6.85 s on relaunch, weights proven open from inside the bundle by `lsof`, then a real index and a real search. Total 1.3 GB. Still owed before anyone else can run it: a deliberate signing story, hardened runtime, notarization, a DMG, and deduping the doubled 237 MB `libtorch_cpu.dylib`. The spawned-server Full Disk Access question is also still open — the test Mac doesn't gate `~/Documents` for *any* app, so a clean result there proves nothing.
 
 ---
 
@@ -42,9 +82,9 @@ pixi run oasis open 2
                   │
                   ▼
       ┌───────────────────────┐
-      │  NL parser (Ollama)   │   file_types = [".pptx"]
-      │  → ParsedQuery        │   date_range  = last month
-      └───────────────────────┘   semantic    = "machine learning"
+      │  NL parser (Ollama)   │   ← OFF by default (measured net-negative)
+      │  → ParsedQuery        │     file_types / date_range / folders
+      └───────────────────────┘
                   │
         ┌─────────┴─────────┐
         ▼                   ▼
@@ -69,17 +109,18 @@ pixi run oasis open 2
             top results
 ```
 
-Every component runs completely locally — embeddings, LLM, and storage. No telemetry, no cloud sync, no API keys required (which also means it's free to use)!
+Every component runs completely locally — embeddings, LLM, and storage. No telemetry, no cloud sync, no API keys required (which also means it's free to use)! The service doesn't even keep an access log, so your queries aren't written down anywhere.
 
 ---
 
 ## Features
 
 - **Three search modes** — keyword (BM25 with porter stemming), semantic (dense vectors), or hybrid (RRF fusion + cross-encoder rerank). Pick with `--mode`.
-- **Natural language queries** — a local LLM (Ollama, `llama3.2:3b`) extracts file types, date ranges, folder hints, and exact-match keywords from your query into a typed schema. Auto-starts Ollama if installed; falls back gracefully if not.
-- **Incremental indexing** — `(size, mtime)` hash skips files that haven't changed since the last run.
+- **Natural language queries** — semantic + hybrid retrieval understands a plain English sentence directly. There is *also* a local-LLM parsing layer (Ollama, `llama3.2:3b`) that extracts file types, date ranges, and folder hints into a typed schema — it's built and tested, but it's off by default because it measured worse (see below).
+- **Incremental indexing** — `(size, mtime)` hash skips files that haven't changed since the last run. Deleted files are reconciled out of all three stores on the next pass; documents indexed before the vector store existed get their embeddings backfilled without `--force`.
 - **Format coverage** — `.txt`, `.md`, `.pdf`, `.docx`, `.pptx`, `.xlsx`, `.csv`. Partial-success extraction means one corrupted page doesn't lose the whole document (Which is quite often the case).
-- **Local by default** — every dependency runs on your machine. The only network call is to `localhost:11434` for Ollama.
+- **Local by default** — every dependency runs on your machine. The only network call is to `localhost:11434` for Ollama, and the shipped app doesn't make it.
+- **CPU inference by default** — portable and deterministic, via conda-forge torch linked against OpenBLAS. Override with `OASIS_DEVICE`.
 
 ---
 
@@ -92,6 +133,66 @@ Every component runs completely locally — embeddings, LLM, and storage. No tel
 | `oasis open <n>` | Opens result `#n` from the last search in the system default app. |
 | `oasis status` | Document count, DB size, last-indexed timestamp. |
 | `oasis reset` | Deletes the index (gives a confirmation prompt; append `--yes` to skip). |
+| `oasis serve` | Runs the loopback HTTP API. `--port` (omit for an ephemeral port), `--managed` to exit when the parent process dies. |
+
+---
+
+## The local HTTP API
+
+`oasis serve` binds loopback only, prints a one-line JSON handshake (port + bearer token) on stdout, and loads models in the background so a client can render a warming state instead of blocking. Every response error is a single envelope shape; every route but health requires the token.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/health` | Model lifecycle (`loading` / `ready` / `error`), document count, `semantic_ready`, `reindex_recommended`. Auth-exempt. |
+| `GET /api/search` | The retrieval path. `q`, `mode`, `limit`, `raw` (defaults `true`). |
+| `GET /api/status` | Counts, index size, last-indexed, indexed roots, stale-document count. |
+| `POST /api/index` | Starts an indexing job (202 + job id); mutually exclusive with reset. |
+| `GET /api/index/events` | SSE progress stream — phases, coalesced counts, heartbeats, terminal event. |
+| `POST /api/index/cancel` | Cancels the running job; partial work stays committed and searchable. |
+| `POST /api/index/remove-root` | Forgets an indexed root — the recourse for a root deleted from disk. |
+| `POST /api/reset` | Wipes the index behind an explicit confirm. |
+| `POST /api/open` | Opens an indexed file in its default app. |
+
+`eval/verify_served.py` re-runs the whole eval through `GET /api/search` and asserts the served rankings are byte-identical to calling `hybrid_search` directly — the seam is checked, not assumed.
+
+---
+
+## Measured results
+
+Every claim below is reproducible with `eval/run_eval.py` over a 300-file labeled corpus and 83 queries (80 scored, 3 expected-empty), with `today` pinned to `2026-07-07`.
+
+**Retrieval matrix** (raw mode, 2026-07-14, pre-migration stack — all four rows measured together, so they're comparable to each other):
+
+| mode | ndcg@10 | mrr | recall@10 | p@5 | p@10 |
+|---|---|---|---|---|---|
+| keyword (BM25) | 0.1768 | 0.1931 | 0.1792 | 0.0600 | 0.0312 |
+| semantic (vector) | 0.4937 | 0.4950 | 0.6167 | 0.1950 | 0.1200 |
+| hybrid (RRF) | 0.4884 | 0.4632 | 0.6500 | 0.1975 | 0.1275 |
+| **hybrid + CE rerank** | **0.5602** | **0.5427** | **0.6844** | **0.2250** | **0.1338** |
+
+The current canonical on the shipped stack (pixi / conda-forge torch / OpenBLAS / CPU) restates the best row as **ndcg@10 0.5601, mrr 0.5427, recall@10 0.6844** — two of 80 queries reordered inside their top-10 and nothing else moved.
+
+Two things that table shows: **the cross-encoder is doing real work** (it's the only step that converts RRF's better recall into better ranking, +0.072 ndcg over raw fusion), and **the keyword row is a strawman** — raw mode feeds a whole sentence to FTS5, which ANDs every term, so 62 of 80 keyword queries return nothing. The keyword-vs-hybrid gap is inflated and shouldn't be quoted.
+
+### The headline finding: NL parsing makes retrieval *worse*
+
+The project was premised on the bet that an LLM parsing queries into structured filters would beat feeding the sentence to hybrid retrieval. **The eval measured that bet and it lost.**
+
+| mode | ndcg@10 raw | ndcg@10 parsed | Δ |
+|---|---|---|---|
+| keyword (BM25) | 0.1768 | 0.2163 | **+0.040** |
+| semantic (vector) | 0.4937 | 0.4156 | −0.078 |
+| hybrid (RRF) | 0.4884 | 0.4246 | −0.064 |
+| **hybrid + CE** | **0.5602** | 0.4522 | **−0.108** |
+
+19 of 80 queries went from finding the answer to finding *nothing*, via two verified mechanisms:
+
+1. **Hallucinated hard filters exclude the gold document.** `"ffmpeg convert video"` → `file_types: ['.mp4','.mov','.avi']` — it confused the *topic* of the document with the *type* of it; the answer is a `.md` file and Oasis doesn't even index `.mp4`. Recall → 0.
+2. **Distilling the query for the embedder destroys meaning.** `"speech asking citizens to serve their country rather than be served"` → `'civic duty'`, which embeds nowhere near the JFK inaugural. `"rising ocean temperatures are killing the reef"` → `'ocean pollution'`, which is factually a different phenomenon.
+
+The root cause is an **asymmetric payoff, not a bad prompt**: a correct hard filter helps marginally, a wrong one zeroes recall, and a 3B model is wrong often enough that the expected value is strongly negative. No prompt-tuning fixes that shape. So the layer is off by default until it's made soft (score boost, not `WHERE` exclusion) and re-measured — and if it stays negative, it gets deleted with the numbers written up.
+
+Latency is deliberately blank. One shipped-bundle search measured 394 ms server-side on a 300-document index; a real p95 budget has **not** been established, and pretending otherwise is exactly the failure the eval discipline exists to prevent.
 
 ---
 
@@ -104,10 +205,16 @@ Every component runs completely locally — embeddings, LLM, and storage. No tel
 | Vector index | LanceDB (cosine, embedded) |
 | Embeddings | `sentence-transformers/all-MiniLM-L6-v2` (384-dim) |
 | Reranker | `cross-encoder/ms-marco-MiniLM-L-6-v2` |
-| NL query parsing | Ollama + `instructor` (JSON mode) |
+| NL query parsing | Ollama + `instructor` (JSON mode) — off by default |
 | CLI | Typer + Rich |
-| Inference device | CPU by default (torch from conda-forge, OpenBLAS); override with `OASIS_DEVICE` |
-| Tests | pytest — ~940 tests covering extractors, index, retrieval, parser, CLI, HTTP API |
+| HTTP service | FastAPI + uvicorn, loopback-only, bearer token, SSE for progress |
+| macOS app | SwiftUI (25 files), menu-bar resident, spawns the server as a child |
+| Packaging | PyInstaller `--onedir`, embedded in `Oasis.app/Contents/Resources/` |
+| Inference device | CPU by default (conda-forge torch, OpenBLAS); override with `OASIS_DEVICE` |
+| Eval | ranx over a labeled corpus; results appended to `eval/results/history.jsonl` |
+| Tests | pytest — **952 tests**, all passing (949 fast + 3 that load real models) |
+
+Run them with `pixi run -e dev pytest` (fast) or `pixi run -e dev pytest -m ''` (everything).
 
 ---
 
@@ -117,22 +224,30 @@ A few of the trade-offs that shaped the project:
 
 - **Reciprocal Rank Fusion instead of score normalization.** BM25 and cosine distance are on different scales; rank-based fusion sidesteps any needed calibration entirely, with the constant k=60 being the standard for ranking.
 - **Cross-encoder rerank only on the top ~20.** Cross-encoders are pretty accurate but slow, so reranking a small candidate pool gets a large majority of the quality benefit at a fraction of the latency.
-- **Local LLM for NL parsing, not cloud.** Privacy is a feature, as people are working with their own files. Ollama runs `llama3.2:3b` fast enough for Oasis on a laptop, and structured output via `instructor` makes it reliable.
+- **One engine, three front-ends.** The CLI, the HTTP service, and the app are thin shells over the same retrieval code. When the CLI was found carrying its own drifted copy of the search path, it was deleted rather than maintained.
+- **Local LLM for NL parsing, not cloud.** Privacy is a feature, as people are working with their own files. The Claude API path that once existed was removed outright — offline operation is a product requirement, not a setting.
 - **Schema-first query parsing.** The LLM fills in a typed `ParsedQuery` (Pydantic), not free-form JSON. Validation therefore catches bad outputs before they reach the retrieval layer.
 - **Partial-success extraction.** A bad page in a PDF doesn't kill the whole document (as formatting in PDFs is wacky sometimes) — failures are caught per-page, logged, and tracked in `extraction_errors` on the extracted document.
+- **CPU inference on conda-forge torch, not the PyPI wheel.** Every stock macOS-arm64 torch wheel links Apple's Accelerate BLAS, whose SGEMV path returns *all-NaN* cross-encoder logits on this macOS — and NaN scores don't raise, they silently degrade reranking to no reranking. conda-forge's OpenBLAS build fixes it, which is the entire reason the project is on `pixi`.
+- **No App Sandbox.** The app is directly distributed, not App Store. Sandboxing is mandatory for the Store and nothing else, and it forbids exactly the two things this app is: spawning a server child outside its bundle, and indexing arbitrary user-chosen folders. `ENABLE_APP_SANDBOX = NO` is architecture, not debt.
 
 ---
 
-## Possible Future Roadmap
+## Roadmap
 
-- **Local HTTP API** — `oasis serve`, a loopback-only FastAPI server that the native app spawns as a child process.
-- **Native macOS app** — SwiftUI client over that API; global hotkey, menu bar, background indexing via FSEvents, Core ML / MLX embeddings for Apple Silicon.
-- **More formats** — email (`.mbox`, `.msg`), images via CLIP, code via tree-sitter.
-- **OCR fallback** for scanned PDFs.
-- **Per-directory `.gitignore` loading** (currently root-level only).
+**Next up**
+- **Signing, notarization, and a DMG** — the last gap between "builds on my machine" and "a stranger can download it".
+- **Make the NL filters soft, or cut the layer.** Convert hard `WHERE` exclusions into post-hoc score boosts, embed the user's actual words instead of the distillation, try a larger parse model — then re-run the matrix and take the decision either way.
+- **Fix `ensure_ollama()`'s health check** — it currently calls a provider "available" if the server answers HTTP and lists the model, which a provider that 500s on every inference also does. It should do one tiny real completion.
+- **First-run Full Disk Access flow**, and a prompt for `reindex_recommended`.
 
----
+**Later**
+- Background, incremental indexing via FSEvents, surviving reboots.
+- Sparkle auto-update.
+- Core ML / MLX embeddings so the bundle is smaller and faster on Apple Silicon.
+- More formats — email (`.mbox`, `.msg`), images via CLIP, code via tree-sitter.
+- OCR fallback for scanned PDFs.
+- Per-directory `.gitignore` loading (currently root-level only).
+- Latin-1 text files (the extractor is UTF-8 only).
 
-## Current Status
-
-Active development. Extraction, keyword index, semantic layer, natural-language query parsing, and the evaluation harness are complete and tested. I'm into the polishing phase (the local HTTP API, the native macOS client, and packaging), as an overwhelming majority of the actual system is completed.
+**Explicit non-goals:** no cloud sync, no hosted index, no remote LLM; not multi-user; not mobile; not the Mac App Store; not competing with Spotlight on exact-filename lookup.

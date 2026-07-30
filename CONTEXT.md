@@ -81,7 +81,7 @@ Do not, anywhere, claim NL parsing improves retrieval. The measured claim is the
 
 Running log of decisions, current state, and what's next. Updated with every change.
 
-Last resynced against the repo: **2026-07-25** (930 tests, all passing, torch-free by default; Swift app step 1 landed).
+Last resynced against the repo: **2026-07-29** (952 tests — 949 fast + 3 `slow` — all passing, `ruff check .` clean, verified by running them; the README was rewritten against this state, see Recently done 2026-07-29).
 
 ---
 
@@ -857,6 +857,23 @@ Same outcome whether launched by `open` or by Finder, and **whether or not the I
 #### Left on the machine
 
 `~/Applications/Oasis.app` (the self-contained build). The index was restored to exactly its pre-test state — 300 documents, one root (`~/Downloads/corpus`) — by removing the three probe roots through `POST /api/index/remove-root`; probe apps, probe folders, and their TCC rows were deleted.
+
+### Recently done (2026-07-29) — README resynced to the true state
+
+The `README.md` had drifted to its 2026-07-26 shape and was describing a project two arcs behind: it listed the HTTP API and the native app under **"Possible Future Roadmap"** (both are built), claimed "~940 tests" (952), and — the part that actually mattered — **sold NL parsing as a headline feature with no mention that the eval measured it at −0.108 ndcg@10 and that it is off by default.** That last one is a direct violation of the "Honesty over marketing — in the README" principle at the top of this file, and it was the reason to rewrite rather than patch.
+
+Verified against the repo before writing, not from memory: `pixi run -e dev pytest` → **949 passed, 3 deselected** (952 total, matching this file), `ruff check .` clean, endpoint list read off the `@router` decorators in `src/oasis/api/`, CLI flags read off `cli/app.py`, `raw` defaults read off `api/search.py` (`True`) and `SearchViewModel.swift` (`"true"`) against the CLI's (`False`).
+
+What changed:
+
+- **A "Where the project actually is" table up top**, one row per piece, stating plainly that there is **no download yet** and running Oasis today means building it.
+- **The macOS app got its own section** — the eight live features, how to build it, and the packaging status stated with its numbers (11.63 s cold offline to ready, 1.3 GB) *and* its debts (signing, notarization, DMG, the `libtorch_cpu` dedup, the unsettled FDA question).
+- **A "Measured results" section** carrying the retrieval matrix, the current canonical restatement, the cross-encoder's real contribution, the keyword-row-is-a-strawman warning, and the **headline finding in full** — the −0.108 table, the two mechanisms with their per-query examples, and the asymmetric-payoff diagnosis. The résumé story is now on the front page instead of buried in this file.
+- **The parsing layer is labeled off-by-default everywhere it appears** — the ASCII diagram's parser box, the Features bullet, the Stack row, and the quick-start examples, which now pass `--raw` with a note that the API and app already default to it and the CLI does not.
+- **Latency: the "under a second" claim is gone.** Replaced with the one measured figure (394 ms server-side on a 300-doc index) and an explicit statement that no p95 budget exists.
+- **`oasis serve` added to the commands table; a new HTTP API section** with the nine endpoints and the `verify_served.py` seam check.
+- **Roadmap split next-up / later**, with the built items removed and the non-goals stated.
+- Smaller truths folded in: incremental indexing now mentions stale reconciliation and no-vector backfill; the stack table gained FastAPI/uvicorn, SwiftUI, PyInstaller and the eval harness; design decisions gained the conda-forge/OpenBLAS reason the project is on pixi, the one-engine-three-front-ends rule, and why `ENABLE_APP_SANDBOX = NO` is architecture.
 
 ### Recently done (2026-07-28) — whole-codebase refactor pass
 
