@@ -4,7 +4,7 @@ import logging
 import os
 import sqlite3
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -53,6 +53,34 @@ def _is_unreadable(path: Path) -> bool:
         return True
     except OSError:
         return False
+
+
+def delete_documents(
+    idx: KeywordIndex,
+    vector_index: VectorIndex | None,
+    docs: Iterable[tuple[int, str]],
+) -> int:
+    """Delete each ``(doc_id, path)`` from both stores; return how many went.
+
+    The ordering is the correctness property and the reason this is one
+    function rather than two: **vectors first, then the ``documents`` row**
+    (whose ``_ad`` trigger cleans FTS). A doc left live in one arm and gone
+    from the other returns stale hits from the survivor.
+
+    Two callers reach the same place by different routes — the stale sweep
+    below (docs under a root the walk didn't see, gated hard on a clean
+    census) and ``POST /api/index/remove-root`` (every doc under a root the
+    user asked to forget, deliberately ungated). Their *predicates* differ and
+    must stay separate; the deletion itself must not, or the two-store
+    ordering becomes a rule maintained by copy-paste.
+    """
+    removed = 0
+    for doc_id, stored_path in docs:
+        if vector_index is not None:
+            vector_index.delete_by_doc_id(doc_id)
+        idx.delete(Path(stored_path))
+        removed += 1
+    return removed
 
 
 def _write_capability_markers(idx: KeywordIndex, embedder: EmbeddingModel | None) -> None:
@@ -197,16 +225,11 @@ def index_directory(
             return
         if on_reconcile:
             on_reconcile()
-        for doc_id, stored_path in idx.docs_under(str(root)):
-            if stored_path in seen:
-                continue
-            # Converge both stores per doc — a doc gone from one arm but live
-            # in the other would return stale hits. Vectors first, then the
-            # documents row (whose _ad trigger cleans FTS).
-            if vector_index is not None:
-                vector_index.delete_by_doc_id(doc_id)
-            idx.delete(Path(stored_path))
-            stats["removed"] += 1
+        stats["removed"] += delete_documents(
+            idx,
+            vector_index,
+            ((doc_id, p) for doc_id, p in idx.docs_under(str(root)) if p not in seen),
+        )
         if stats["removed"]:
             logger.info("Removed %d stale document(s) under %s", stats["removed"], root)
 

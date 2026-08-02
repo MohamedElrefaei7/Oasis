@@ -126,8 +126,8 @@ class AppState:
 
 _local = threading.local()
 # Bumped by invalidate(); a thread whose cached connection predates the current
-# generation reopens on next use. reset will need this — after the DB file is
-# deleted, every thread's handle points at a file that no longer exists.
+# generation reopens on next use. reset_index() uses it: once the index has
+# been cleared, every thread's cached handle should reopen rather than linger.
 _generation = 0
 _generation_lock = threading.Lock()
 # Serializes open_db(): two threads opening a fresh DB concurrently race on

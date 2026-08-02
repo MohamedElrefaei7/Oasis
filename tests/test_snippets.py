@@ -2,50 +2,13 @@
 
 from __future__ import annotations
 
-import sqlite3
-from pathlib import Path
-from unittest.mock import MagicMock
-
-import pytest
-
-from oasis.index.db import open_db
 from oasis.index.keyword import MATCH_END, MATCH_START
 from oasis.query.snippets import (
-    SNIPPET_TOKENS,
     _extract_terms,
     _highlight_terms,
-    fts_snippet,
-    get_snippet,
     text_snippet,
     to_segments,
 )
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def conn(tmp_path: Path) -> sqlite3.Connection:
-    return open_db(tmp_path / "test.db")
-
-
-def _insert_doc(
-    conn: sqlite3.Connection,
-    *,
-    path: str = "/doc.txt",
-    title: str = "Doc",
-    content: str,
-) -> int:
-    conn.execute(
-        "INSERT INTO documents (path, extension, size, mtime, indexed_at, content_hash, title, content)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (path, ".txt", 100, 1.0, 1.0, "abc123", title, content),
-    )
-    conn.commit()
-    row = conn.execute("SELECT id FROM documents WHERE path = ?", (path,)).fetchone()
-    return row["id"]
-
 
 # ---------------------------------------------------------------------------
 # _extract_terms
@@ -146,60 +109,6 @@ def test_highlight_multiple_occurrences() -> None:
 
 
 # ---------------------------------------------------------------------------
-# fts_snippet
-# ---------------------------------------------------------------------------
-
-
-def test_fts_snippet_constant() -> None:
-    assert SNIPPET_TOKENS == 40
-
-
-def test_fts_snippet_returns_string(conn: sqlite3.Connection) -> None:
-    doc_id = _insert_doc(conn, content="The quick brown fox jumps over the lazy dog.")
-    result = fts_snippet(conn, "fox", doc_id)
-    assert isinstance(result, str)
-
-
-def test_fts_snippet_contains_match_markers(conn: sqlite3.Connection) -> None:
-    doc_id = _insert_doc(conn, content="The quick brown fox jumps over the lazy dog.")
-    result = fts_snippet(conn, "fox", doc_id)
-    assert result is not None
-    assert MATCH_START in result
-    assert MATCH_END in result
-
-
-def test_fts_snippet_contains_matched_term(conn: sqlite3.Connection) -> None:
-    doc_id = _insert_doc(conn, content="The quick brown fox jumps over the lazy dog.")
-    result = fts_snippet(conn, "fox", doc_id)
-    assert result is not None
-    assert "fox" in result
-
-
-def test_fts_snippet_none_when_doc_not_found(conn: sqlite3.Connection) -> None:
-    result = fts_snippet(conn, "fox", 9999)
-    assert result is None
-
-
-def test_fts_snippet_none_on_operational_error() -> None:
-    conn = MagicMock(spec=sqlite3.Connection)
-    conn.execute.side_effect = sqlite3.OperationalError("syntax error")
-    result = fts_snippet(conn, "bad query", 1)
-    assert result is None
-
-
-def test_fts_snippet_custom_num_tokens(conn: sqlite3.Connection) -> None:
-    long_content = " ".join(["word"] * 100)
-    doc_id = _insert_doc(conn, content=long_content)
-    result = fts_snippet(conn, "word", doc_id, num_tokens=5)
-    assert isinstance(result, str)
-
-
-def test_fts_snippet_returns_none_for_empty_table(conn: sqlite3.Connection) -> None:
-    result = fts_snippet(conn, "anything", 1)
-    assert result is None
-
-
-# ---------------------------------------------------------------------------
 # text_snippet
 # ---------------------------------------------------------------------------
 
@@ -261,42 +170,6 @@ def test_text_snippet_no_trailing_ellipsis_when_text_fits() -> None:
     text = "the fox"
     result = text_snippet(text, "fox", length=200)
     assert not result.endswith("…")
-
-
-# ---------------------------------------------------------------------------
-# get_snippet
-# ---------------------------------------------------------------------------
-
-
-def test_get_snippet_returns_string(conn: sqlite3.Connection) -> None:
-    doc_id = _insert_doc(conn, content="test content here")
-    result = get_snippet(conn, "test", doc_id, "fallback")
-    assert isinstance(result, str)
-
-
-def test_get_snippet_uses_fts_when_available(conn: sqlite3.Connection) -> None:
-    doc_id = _insert_doc(conn, content="The quick brown fox jumps over the lazy dog.")
-    result = get_snippet(conn, "fox", doc_id, "fallback text")
-    assert MATCH_START in result
-    assert "fox" in result
-
-
-def test_get_snippet_falls_back_when_doc_not_in_index(conn: sqlite3.Connection) -> None:
-    result = get_snippet(conn, "word", 9999, "fallback text with word here")
-    assert "fallback" in result or "word" in result
-
-
-def test_get_snippet_fallback_highlights_terms(conn: sqlite3.Connection) -> None:
-    result = get_snippet(conn, "word", 9999, "fallback text with word here")
-    assert MATCH_START in result
-
-
-def test_get_snippet_falls_back_on_operational_error() -> None:
-    conn = MagicMock(spec=sqlite3.Connection)
-    conn.execute.side_effect = sqlite3.OperationalError("error")
-    result = get_snippet(conn, "query", 1, "the fallback text with query")
-    assert isinstance(result, str)
-    assert "fallback" in result
 
 
 # ---------------------------------------------------------------------------

@@ -22,7 +22,7 @@ from oasis.config import load_config
 from oasis.index.db import db_size_bytes, open_db
 from oasis.index.embeddings import SentenceTransformerEmbedder
 from oasis.index.keyword import MATCH_END, MATCH_START, KeywordIndex
-from oasis.index.pipeline import index_directory
+from oasis.index.pipeline import OnChunksProgress, OnFile, index_directory
 from oasis.index.vector import VectorIndex
 from oasis.llm.manager import ensure_ollama
 from oasis.query.parser import ParsedQuery, parse_query
@@ -148,6 +148,15 @@ def index(
         emb = SentenceTransformerEmbedder()
         vec_idx = VectorIndex(db_path.with_name(db_path.stem + ".lance"), dimension=emb.dimension)
 
+    # The two display modes differ only in their callbacks; the call itself is
+    # written once so its argument list can't drift between them.
+    def run(on_file: OnFile, on_chunks_progress: OnChunksProgress) -> dict[str, int]:
+        return index_directory(
+            conn, path, force=force, on_file=on_file,
+            vector_index=vec_idx, embedder=emb,
+            on_chunks_progress=on_chunks_progress,
+        )
+
     if verbose:
         def on_file(p: Path, status: str) -> None:
             style = _STATUS_STYLE.get(status, "")
@@ -166,11 +175,7 @@ def index(
             if done >= total:
                 embed_p[0].stop()
 
-        stats = index_directory(
-            conn, path, force=force, on_file=on_file,
-            vector_index=vec_idx, embedder=emb,
-            on_chunks_progress=on_chunks_progress,
-        )
+        stats = run(on_file, on_chunks_progress)
     else:
         with Progress(*_EMBED_PROGRESS_COLUMNS, console=_console) as progress:
             scan_task = progress.add_task("Scanning…", total=None)
@@ -187,11 +192,7 @@ def index(
                     )
                 progress.update(embed_task_id[0], completed=done)
 
-            stats = index_directory(
-                conn, path, force=force, on_file=on_file,
-                vector_index=vec_idx, embedder=emb,
-                on_chunks_progress=on_chunks_progress,
-            )
+            stats = run(on_file, on_chunks_progress)
 
     conn.close()
 

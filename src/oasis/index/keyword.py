@@ -353,9 +353,8 @@ class KeywordIndex:
 
         *root* must already be absolutized (the pipeline applies
         ``os.path.abspath`` before calling) so the stored form matches the
-        document paths built from it — the stale-sweep reconciliation planned
-        for full reindex is only valid against the exact root that produced the
-        rows, never a guessed common prefix.
+        document paths built from it — the stale sweep is only valid against the
+        exact root that produced the rows, never a guessed common prefix.
         """
         roots = self.get_indexed_roots()
         if root in roots:

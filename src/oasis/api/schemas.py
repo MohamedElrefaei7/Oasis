@@ -203,10 +203,9 @@ class SearchResponse(ApiModel):
 class IndexRequest(ApiModel):
     """Body of POST /api/index.
 
-    ``force`` is part of the contract *now* even though this commit only passes
-    it through to ``index_directory(force=...)`` (re-embed everything, skip the
-    unchanged check). The next commit gives it stale-sweep semantics; keeping it
-    on the wire from the start means the Swift client never has to change shape.
+    ``force`` governs *embedding*, not walking: it re-embeds everything and
+    skips the unchanged check. A plain (non-force) reindex still walks the whole
+    root, so the stale sweep runs either way — see ``index_directory``.
     """
 
     root: str

@@ -11,11 +11,11 @@ undoes it for one folder:
   from disk, which otherwise wedges Reindex forever. See Part D — it is
   deliberately unconditional where the stale sweep is gated.
 
-This commit does *exactly* what ``index_directory`` already does (add + update)
-— it does **not** delete stale documents or backfill missing vectors. It only
-makes that work async, observable, and cancellable. The done-vs-cancelled
-distinction decided in ``_run_job`` is load-bearing for the next commit's stale
-sweep (see the note there).
+These routes add no retrieval or storage behaviour of their own: they make
+``index_directory``'s existing work (add, update, stale sweep, vector backfill)
+async, observable, and cancellable. The done-vs-cancelled distinction decided
+in ``_run_job`` is what the pipeline's sweep gate reads — a cancelled run
+reports ``removed: 0`` and deletes nothing.
 
 The events endpoint is the server's one ``async def`` handler (CLAUDE.md
 § Concurrency): SSE is a long-lived wait, not CPU-bound work, so it belongs on
@@ -33,7 +33,6 @@ import os
 import threading
 import uuid
 from datetime import UTC, datetime
-from pathlib import Path
 
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
@@ -56,7 +55,7 @@ from oasis.api.schemas import (
 )
 from oasis.api.state import AppState, get_conn
 from oasis.index.keyword import KeywordIndex
-from oasis.index.pipeline import index_directory
+from oasis.index.pipeline import delete_documents, index_directory
 
 _log = logging.getLogger(__name__)
 
@@ -368,19 +367,14 @@ def remove_root(request: Request, body: RemoveRootRequest) -> RemoveRootResponse
                 detail={"code": "not_found", "message": f"Not an indexed folder: {root}"},
             )
 
-        # Scoped delete, reusing the sweep's helper — docs_under does the
+        # Scoped delete, reusing the sweep's two helpers. docs_under does the
         # separator-boundary check in Python precisely because SQL LIKE would
         # treat a path's `_` as a wildcard, and a bare prefix match would put
         # /tmp/ab under /tmp/a. Over-matching here deletes someone else's rows.
-        removed = 0
-        for doc_id, stored_path in idx.docs_under(root):
-            # Converge both stores per doc, vectors first then the documents row
-            # (whose _ad trigger cleans FTS) — the sweep's order. A doc left in
-            # one arm but gone from the other returns stale hits.
-            if state.vector_index is not None:
-                state.vector_index.delete_by_doc_id(doc_id)
-            idx.delete(Path(stored_path))
-            removed += 1
+        # delete_documents owns the vectors-then-row ordering both call sites
+        # depend on. What differs here is only the predicate: every doc under
+        # the root, with no census gate (see the docstring above).
+        removed = delete_documents(idx, state.vector_index, idx.docs_under(root))
 
         # Marker LAST. A crash with the rows gone but the root still listed
         # leaves the operation retryable; the reverse orphans rows under a root

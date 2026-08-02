@@ -62,7 +62,6 @@ rich = ">=14.3.4"
 tiktoken = ">=0.13.0"
 typer = ">=0.25.1"
 uvicorn = ">=0.51.0"
-watchdog = ">=6.0.0"
 
 [pypi-dependencies]
 # conda-forge carries only lancedb 0.30.0. Version re-confirmed by measurement,

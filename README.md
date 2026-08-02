@@ -20,7 +20,7 @@ Most built-in OS search indexes shallowly and ranks poorly. `grep` can't help wh
 
 | Piece | State |
 |---|---|
-| Extraction, keyword index, vector index, hybrid retrieval + rerank | **Done**, measured, 952 tests |
+| Extraction, keyword index, vector index, hybrid retrieval + rerank | **Done**, measured, 939 tests |
 | Evaluation harness (`eval/`) | **Done** — 300-file labeled corpus, 83 queries, reproducible matrix |
 | Natural-language query parsing | **Built, and disabled by default** — the eval measured it as a **−0.108 ndcg@10 regression**. See [Measured results](#measured-results) |
 | Local HTTP API (`oasis serve`) | **Done** — every endpoint implemented, served rankings verified byte-identical to the eval harness |
@@ -119,7 +119,7 @@ Every component runs completely locally — embeddings, LLM, and storage. No tel
 - **Natural language queries** — semantic + hybrid retrieval understands a plain English sentence directly. There is *also* a local-LLM parsing layer (Ollama, `llama3.2:3b`) that extracts file types, date ranges, and folder hints into a typed schema — it's built and tested, but it's off by default because it measured worse (see below).
 - **Incremental indexing** — `(size, mtime)` hash skips files that haven't changed since the last run. Deleted files are reconciled out of all three stores on the next pass; documents indexed before the vector store existed get their embeddings backfilled without `--force`.
 - **Format coverage** — `.txt`, `.md`, `.pdf`, `.docx`, `.pptx`, `.xlsx`, `.csv`. Partial-success extraction means one corrupted page doesn't lose the whole document (Which is quite often the case).
-- **Local by default** — every dependency runs on your machine. The only network call is to `localhost:11434` for Ollama, and the shipped app doesn't make it.
+- **Local by default** — every dependency runs on your machine, and nothing ever leaves it. The only socket Oasis opens at all is loopback: its own API, and a probe to `localhost:11434` to see whether Ollama is around.
 - **CPU inference by default** — portable and deterministic, via conda-forge torch linked against OpenBLAS. Override with `OASIS_DEVICE`.
 
 ---
@@ -212,7 +212,7 @@ Latency is deliberately blank. One shipped-bundle search measured 394 ms server-
 | Packaging | PyInstaller `--onedir`, embedded in `Oasis.app/Contents/Resources/` |
 | Inference device | CPU by default (conda-forge torch, OpenBLAS); override with `OASIS_DEVICE` |
 | Eval | ranx over a labeled corpus; results appended to `eval/results/history.jsonl` |
-| Tests | pytest — **952 tests**, all passing (949 fast + 3 that load real models) |
+| Tests | pytest — **939 tests**, all passing (936 fast + 3 that load real models) |
 
 Run them with `pixi run -e dev pytest` (fast) or `pixi run -e dev pytest -m ''` (everything).
 

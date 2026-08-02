@@ -81,7 +81,7 @@ Do not, anywhere, claim NL parsing improves retrieval. The measured claim is the
 
 Running log of decisions, current state, and what's next. Updated with every change.
 
-Last resynced against the repo: **2026-07-29** (952 tests — 949 fast + 3 `slow` — all passing, `ruff check .` clean, verified by running them; the README was rewritten against this state, see Recently done 2026-07-29).
+Last resynced against the repo: **2026-07-29** (939 tests — 936 fast + 3 `slow` — all passing, `ruff check .` clean, verified by running them. Two passes that day: the README rewritten against the true state, then a subtraction pass that cut 151 lines and one unused dependency — see both Recently done 2026-07-29 entries).
 
 ---
 
@@ -115,7 +115,7 @@ src/oasis/
 ├── llm/                 __init__, base, manager, ollama
 └── query/               __init__, parser, retriever, reranker, snippets, search
 
-tests/                   38 test modules, 952 tests
+tests/                   38 test modules, 939 tests
 ├── fixtures/            sample.{txt,md,pdf,docx,pptx,xlsx,csv}
 eval/
 ├── corpus/              301 labeled files + MANIFEST.md
@@ -330,9 +330,9 @@ The jump is entirely from splitting `hybrid_search`'s try blocks (below). 10 of 
 
 ---
 
-## Tests — 952, all passing
+## Tests — 939, all passing
 
-Run with `pixi run -e dev pytest` (fast: 949 + 3 `slow` deselected) or `pixi run -e dev pytest -m ''` (all 952). Slow tests load real models on CPU.
+Run with `pixi run -e dev pytest` (fast: 936 + 3 `slow` deselected) or `pixi run -e dev pytest -m ''` (all 939). Slow tests load real models on CPU. (952 until 2026-07-29, when the subtraction pass deleted the 13 tests covering the dead `fts_snippet`/`get_snippet` path along with the functions themselves.)
 
 > **`FORCE_COLOR` / `COLUMNS` in the environment produce 8 false failures.** Every CLI test that asserts on output text (`'1 result' in result.output`, `'3 indexed'`, `'No result #5'`, …) breaks if Rich decides to emit ANSI into Click's `CliRunner` capture. `FORCE_COLOR` makes it colour a non-TTY, and `COLUMNS=0` makes it pick a degenerate width and wrap mid-assertion — the output then reads `'\x1b[?25l\x1b[32m⠋\x1b[0m \x1b[2mParsing query…'` and the substring is genuinely absent. Nothing is wrong with the code. Some terminals and agent harnesses export both, so a suite that is green in one shell is 8-red in another; measured 2026-07-28, where it briefly looked like a regression on `master`. Reproduce a clean run with `env -u FORCE_COLOR -u COLUMNS pixi run -e dev pytest`. (The durable fix, if this recurs, is to pin the terminal in the test fixture rather than to trust the ambient environment.)
 
@@ -364,7 +364,7 @@ Also new 2026-07-15: `test_api_search.py` (18) — real SQLite+LanceDB over a 3-
 | `test_vector.py` | 58 | `test_keyword.py` | 29 | `test_llm_providers.py` | 17 |
 | `test_retriever.py` | 58 | `test_embeddings.py` | 25 | `test_keyword_edges.py` | 17 |
 | `test_cli.py` | 54 | `test_cli_edges.py` | 22 | `test_human_size.py` | 16 |
-| `test_snippets.py` | 40 | `test_extractor_edges.py` | 21 | `test_db.py` | 16 |
+| `test_snippets.py` | 35 | `test_extractor_edges.py` | 21 | `test_db.py` | 16 |
 | `test_parser.py` | 37 | `test_ollama_manager.py` | 20 | `test_pdf_extractor.py` | 15 |
 | `test_reranker.py` | 36 | `test_integration.py` | 20 | `test_docx_extractor.py` | 15 |
 | `test_chunker.py` | 35 | `test_extractors.py` | 20 | `test_config.py` | 11 |
@@ -435,9 +435,9 @@ Also new 2026-07-15: `test_api_search.py` (18) — real SQLite+LanceDB over a 3-
 
 ---
 
-## Phase 5.2 — HTTP API (specced, not implemented)
+## Phase 5.2 — HTTP API (the design record; **fully implemented**)
 
-Full contract in `CLAUDE.md` § HTTP API. **The consumer is a native SwiftUI app that spawns the server as a child process** — not the HTMX web UI on the README roadmap. The spec is organized around where a long-lived local service diverges from the CLI. No code yet: `fastapi`/`uvicorn` aren't dependencies and `src/oasis/api/` doesn't exist.
+Full contract in `CLAUDE.md` § HTTP API; the code is `src/oasis/api/` and every endpoint below is built and tested. **The consumer is a native SwiftUI app that spawns the server as a child process** — not the HTMX web UI on the old README roadmap. This section is kept as the *design record* — the reasoning that produced each decision, which the implementation docstrings state but do not argue. The heading used to read "specced, not implemented" and the body claimed `fastapi`/`uvicorn` weren't dependencies and `src/oasis/api/` didn't exist; that was true on 2026-07-14 and false from 2026-07-15 on. Corrected 2026-07-29.
 
 Decisions worth carrying:
 
@@ -857,6 +857,68 @@ Same outcome whether launched by `open` or by Finder, and **whether or not the I
 #### Left on the machine
 
 `~/Applications/Oasis.app` (the self-contained build). The index was restored to exactly its pre-test state — 300 documents, one root (`~/Downloads/corpus`) — by removing the three probe roots through `POST /api/index/remove-root`; probe apps, probe folders, and their TCC rows were deleted.
+
+### Recently done (2026-07-29) — subtraction pass: cut what nothing needs
+
+A read of `src/`, `eval/`, the 25 Swift files and the dependency manifests with one brief: **delete what isn't needed.** Net **−151 lines** across src + tests, one dependency gone from the shipped bundle, 952 → 939 tests (the 13 removed tested only deleted code). `ruff check .` clean, mypy unchanged at 34 pre-existing errors (**counted before and after** — this pass introduced none), full suite green including the 3 `slow`.
+
+The bar was: *does anything in production reach this?* Tests referencing a symbol do **not** make it live — two of the four real finds were kept alive by nothing but their own tests.
+
+#### `watchdog` was a declared dependency that nothing imports 📦
+
+In both `pyproject.toml` and `pixi.toml` since the beginning; the only hits for the string anywhere in the repo are **this project's own parent-death thread** (`api/serve.py`, hand-rolled on `os.getppid()`) and Swift comments about it. The library was almost certainly added in anticipation of FSEvents-driven background indexing, which is a Tier-1 goal that hasn't been started. It was being resolved, installed, and **frozen into the 1.3 GB bundle** for nothing.
+
+Removed and re-locked. `pixi lock` produced a **20-line diff, every line the watchdog package block** — no version churn anywhere else, which was the thing to check before touching the lock at all: the whole point of the single solve-group is that the numpy/torch the eval measured is the one that ships, and a re-solve that bumped them would have invalidated the measured matrix to save 3 MB. It didn't.
+
+#### The FTS5 snippet path was dead, and its tests were the only thing holding it up 🪦
+
+`get_snippet()` and `fts_snippet()` in `query/snippets.py` — ~40 lines including their own `SELECT snippet(documents_fts, …)` statement — had **zero production callers**. Nothing had called them for a long time: the keyword arm gets its snippet from `KeywordIndex.search`'s own `snippet()` column, and the semantic arm calls `text_snippet()`. What kept them looking alive was `test_snippets.py`, which imported and exercised both across 13 tests.
+
+That is the failure mode worth naming: *a symbol with tests looks maintained*. Grep says "12 references", the module reads as load-bearing, and nobody checks whether any of the references is a caller rather than an assertion. Deleted the functions, the `SNIPPET_TOKENS` constant, the 13 tests, and the `conn` fixture + `_insert_doc` helper that existed only to feed them — which took the `sqlite3`/`open_db`/`MagicMock`/`pytest` imports out of that test module with them. `to_segments`, `text_snippet` and the property tests are untouched; that file is now 35 tests, all of live code.
+
+**Also a small note on the SQL that went with it:** `fts_snippet` was the second place in the codebase issuing a `snippet(documents_fts, …)` query, which quietly violated "all keyword-index SQL lives in `KeywordIndex`". Deleting it restored the rule rather than requiring a migration to enforce it.
+
+#### The two-store delete ordering was maintained by copy-paste 🐛-adjacent
+
+`pipeline.reconcile()` (the stale sweep) and `POST /api/index/remove-root` both walk `(doc_id, path)` pairs and delete each from **both** stores, **vectors first, then the `documents` row** whose `_ad` trigger cleans FTS. Same six lines, in two modules, each with its own comment explaining the ordering — and the ordering is a correctness property: a doc left live in one arm and gone from the other serves stale hits from the survivor.
+
+This is precisely the shape `CLAUDE.md` § Don't warns about, and it had already been noticed twice (both comments say "the sweep's order") without being fixed. Extracted `pipeline.delete_documents(idx, vector_index, docs) -> int`. What deliberately did **not** merge is the *predicate*: the sweep passes only docs the walk didn't see and is gated hard on a clean census, while remove-root passes every doc under the root with no gate at all — that asymmetry is load-bearing (a census gate on remove-root would break the deleted-root case it exists for) and is now stated in the helper's docstring instead of being implied by two similar loops.
+
+Verified live, not just in tests: indexed a 3-file folder, deleted one file, reindexed → `Done — 0 indexed  2 skipped  1 removed`, and the deleted file was gone from the next search's results.
+
+#### The CLI wrote its `index_directory` call twice
+
+`cli/app.py`'s `index` command branches on `--verbose` into two display strategies, and each branch ended with its own copy of the same six-argument `index_directory(...)` call. The callbacks genuinely differ; the call doesn't. Hoisted into one local `run(on_file, on_chunks_progress)` closure so the argument list exists once and can't drift — the same failure this codebase already had between the CLI and the API's search paths. Display logic in both branches is byte-identical to before, and **both were exercised in a real terminal** (not just `CliRunner`, which doesn't drive Rich's live display): plain mode renders scan → embed → `3 indexed`, `--verbose` renders the per-file lines and the sweep summary.
+
+#### Four comments that described a repo that no longer exists
+
+Not cosmetic — each one actively misinforms a reader about what the code does now:
+
+- `api/index.py`'s module docstring: *"This commit does exactly what index_directory already does (add + update) — it does **not** delete stale documents or backfill missing vectors."* Both landed on 2026-07-17. A reader trusting this would go looking for reconciliation that is already there, thirty lines away.
+- `api/schemas.py` `IndexRequest`: *"`force` … this commit only passes it through … The next commit gives it stale-sweep semantics."* The next commit came and went; `force` governs embedding, not walking, and the sweep runs either way. Replaced with what's actually true.
+- `api/state.py`: *"reset will need this"* about the connection-generation counter. `reset_index()` exists and calls `invalidate()` three lines away.
+- `index/keyword.py` `add_indexed_root`: *"the stale-sweep reconciliation **planned** for full reindex"* — built, not planned.
+
+The pattern is commit-relative narration ("this commit", "the next commit", "will need") in permanent docstrings. It reads as current tense forever and expires silently. Worth avoiding in new comments; a `git log` sentence belongs in a commit message or in this file, not in a docstring.
+
+Same class, in this file: the `## Phase 5.2 — HTTP API` heading still said **"(specced, not implemented)"** with a body claiming `fastapi`/`uvicorn` weren't dependencies and `src/oasis/api/` didn't exist. True on 2026-07-14, false since 2026-07-15, and it sat directly above the sections describing the implemented server. Retitled to "the design record; **fully implemented**"; the decision table is kept because it carries the *reasoning*, which the docstrings state but don't argue.
+
+#### Considered and deliberately kept
+
+Listed so the next pass doesn't re-litigate them:
+
+- **`VectorIndex.count()`** — no production caller, but it is a 2-line accessor that **seven tests** use to verify upsert/delete behaviour. Cutting it would push those tests onto the private `_table` handle: strictly worse. Kept.
+- **`VectorResult.chunk_id`** — populated from the LanceDB projection on every search and read by no production code (only test assertions). It is the row's identity and the merge key's echo; dropping it from the `.select()` saves one string column per candidate and costs real churn in `test_vector.py`. Judged not worth it. Kept, and noted here as the most defensible remaining cut if bundle/latency work ever wants it.
+- **`Chunk.token_count`** — written, never read outside tests. One int on a dataclass that is *about* tokens; removing it would touch ~7 tests to save nothing measurable.
+- **`DocumentMetadata.ctime` / `author` / `page_count` / `language`** — written into `metadata_json` (and `language` into its own column) and never read back by search or display. This is *stored data*, not dead code: dropping it means a schema change and a reindex, for no gain, and the fields are the obvious raw material for a future "sort by author/date" facet.
+- **The whole NL parsing layer** (`llm/`, `query/parser.py`, ~250 lines + 128 tests) — the single largest cuttable thing in the repo, measured net-negative, and off by default in two of three front-ends. **Not touched deliberately:** Tier 2's definition of done is *a decision, either direction*, and that decision needs the soft-filter and un-distilled-embedding experiments run first. Cutting it in a tidying pass would preempt the measurement and throw away the experiment's subject. See Up Next.
+- **`_TERMINAL_STATUSES` (index.py) vs `TERMINAL_TYPES` (jobs.py)** — identical `frozenset({"done","cancelled","error"})`, but one is a *job status* and the other an *event type*; they coincide today and are not required to. Merging would save three lines and conflate two vocabularies.
+
+#### What the pass confirmed is already clean
+
+Worth recording so it isn't re-checked: **no junk is tracked in git** (no `.DS_Store`, `__pycache__`, `xcuserdata`, `.spec`, or build output among the 457 tracked files — `spike/serve_entry.spec` is generated by `build.sh` and correctly gitignored); **no orphan Swift types** (every type in the 25-file app is referenced outside its own file); **no dead symbols in `eval/`**; and `ruff check .` was and remains clean whole-tree.
+
+One thing on disk, not in git, and **not deleted here because it is 1.5 GB and irreversible**: `.venv.pre-pixi-SAFE-TO-DELETE/`, left by the 2026-07-25 pixi migration. The migration is long since landed and verified, so it is almost certainly safe to `rm -rf`, but that is a call to make deliberately rather than as a side effect of a code-cleanup pass. (Also on disk: a stray `app/Oasis/.mypy_cache/`, 264 KB, from a mypy run in the wrong directory.)
 
 ### Recently done (2026-07-29) — README resynced to the true state
 
