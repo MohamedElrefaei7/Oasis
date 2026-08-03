@@ -74,6 +74,11 @@ def folder_like_pattern(folder: str) -> str:
 # within a wide band; do not tune them expecting hybrid to move.
 BM25_WEIGHTS = (8.0, 0.4, 2.0, 1.0)
 
+# Tokens of context FTS5's snippet() returns around a match. This is not only a
+# display setting: the snippet is also the passage the cross-encoder reranks
+# against, so it doubles as that model's context budget.
+SNIPPET_TOKENS = 20
+
 # Non-printable sentinels passed to snippet() via SQLite's char() function.
 # char(2)/char(3) in the SQL avoids any string interpolation in the query.
 # They cannot appear in document text and don't conflict with Rich's [...] markup.
@@ -284,7 +289,8 @@ class KeywordIndex:
                 d.id,
                 d.path,
                 d.title,
-                snippet(documents_fts, {FTS_COL_CONTENT}, char(2), char(3), '…', 20) AS snippet,
+                snippet(documents_fts, {FTS_COL_CONTENT}, char(2), char(3), '…', {SNIPPET_TOKENS})
+                    AS snippet,
                 bm25(documents_fts, {weights}) AS rank
             FROM documents_fts
             JOIN documents d ON d.id = documents_fts.rowid

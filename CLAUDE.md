@@ -88,7 +88,7 @@ Owned in app state, initialized exactly once:
 | `SentenceTransformerEmbedder` | ~seconds to load; `_MODEL_CACHE` makes it once-per-process anyway |
 | `CrossEncoderReranker` | same |
 | `VectorIndex` | holds an open LanceDB table handle |
-| `OllamaProvider \| None` | **`ensure_ollama()` runs once at startup, not per search.** The CLI calls it on every search, which is fine for a one-shot process and pathological for a server — it spawns `ollama list` per query. Cache the provider; cache `None` too, so an absent Ollama doesn't re-probe on every request. |
+| `OllamaProvider \| None` | **`ensure_ollama()` runs once per process, on first use — *not* at startup** (`AppState.get_llm()`, corrected 2026-08-02). "Once, not per search" is the rule that matters: the CLI calls it per search, which is fine for a one-shot process and pathological for a server that would spawn `ollama list` per query. But *startup* was the wrong "once" — `ensure_ollama()` doesn't only look, it **starts `ollama serve`** when the binary is on PATH, so every launch of an app that hardcodes `raw=true` spun up an LLM server the user never asked for and left it running. Cache the provider; cache `None` too, via a separate `llm_probed` flag so a negative result isn't re-probed. Inject with `set_llm()`, never by assigning `state.llm` — the flag is what stops a real probe from overwriting it. |
 
 Both models are then **warmed with a throwaway inference** (`embed(["warmup"])`, `rerank("warmup", [one dummy result])`). Load time and first-inference time are separate costs — lazy kernel init, weight paging — and warming folds both into startup where the user is already waiting.
 

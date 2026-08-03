@@ -20,8 +20,8 @@ Most built-in OS search indexes shallowly and ranks poorly. `grep` can't help wh
 
 | Piece | State |
 |---|---|
-| Extraction, keyword index, vector index, hybrid retrieval + rerank | **Done**, measured, 988 tests |
-| Filename search | **Done** (2026-08-02) — names are their own weighted FTS column *and* their own embedded chunk; **+0.068 ndcg@10**. See [Measured results](#measured-results) |
+| Extraction, keyword index, vector index, hybrid retrieval + rerank | **Done**, measured, 1001 tests |
+| Filename search | **Done** (2026-08-02) — names are their own weighted FTS column *and* their own embedded chunk. That, plus feeding the reranker prose, took ndcg@10 **0.5601 → 0.6981**. See [Measured results](#measured-results) |
 | Evaluation harness (`eval/`) | **Done** — 300-file labeled corpus, 83 queries, reproducible matrix |
 | Natural-language query parsing | **Built, and disabled by default** — the eval measured it as a **−0.108 ndcg@10 regression**. See [Measured results](#measured-results) |
 | Local HTTP API (`oasis serve`) | **Done** — every endpoint implemented, served rankings verified byte-identical to the eval harness |
@@ -174,8 +174,8 @@ Every claim below is reproducible with `eval/run_eval.py` over a 300-file labele
 |---|---|---|---|---|
 | keyword (BM25) | 0.1835 | 0.2025 | 0.1792 | 0.0625 |
 | hybrid (RRF) | 0.6531 | 0.6317 | **0.7963** | 0.2650 |
-| **hybrid + CE rerank** (shipping) | 0.6280 | 0.6331 | 0.7442 | 0.2300 |
-| semantic (vector) | **0.6994** | **0.7177** | 0.7817 | **0.2700** |
+| semantic (vector) | 0.6994 | 0.7177 | 0.7817 | 0.2700 |
+| **hybrid + CE rerank** (shipping) | **0.6981** | **0.7066** | 0.7713 | 0.2625 |
 
 **The keyword row is a strawman** — raw mode feeds a whole sentence to FTS5, which ANDs every term, so most keyword queries return nothing. The keyword-vs-hybrid gap is inflated and shouldn't be quoted.
 
@@ -188,7 +188,8 @@ Until 2026-08-02 a filename was only reachable as part of the raw absolute path 
 | before (flat weights, no name chunk, name-blind reranker) | 0.5601 | 0.6844 | 0.5427 |
 | + BM25 column weights | 0.5601 | 0.6844 | 0.5427 |
 | + filename vector chunk | 0.6169 | 0.7567 | 0.6039 |
-| + name-aware reranker (shipping) | **0.6280** | 0.7442 | **0.6331** |
+| + name-aware reranker | 0.6280 | 0.7442 | 0.6331 |
+| **+ prose passages for the reranker (shipping)** | **0.6981** | **0.7713** | **0.7066** |
 
 **The vector chunk is the entire effect.** In the semantic arm alone it is worth **+0.206 ndcg@10** (0.4939 → 0.6994) — by far the largest single retrieval change ever measured in this project. The BM25 column weights, by contrast, changed **nothing**: swept from flat 1.0 to 32× filename, including dropping the path column to zero, every setting produced identical hybrid numbers, because RRF consumes only rank order and the cross-encoder re-scores the top 20 from scratch. They are kept only for `--mode keyword`, which has no reranker downstream and does improve (0.1776 → 0.1835).
 
@@ -197,7 +198,30 @@ Until 2026-08-02 a filename was only reachable as part of the raw absolute path 
 Two honest caveats:
 
 1. **The eval corpus flatters this change.** Its filenames were authored to be self-describing (`manual-espresso-machine-em500.pdf`, `paper-okapi-at-trec3.pdf`). Real directories are full of `Document (1).pdf` and `IMG_4032.HEIC`, where a filename carries no signal, so **+0.206 is an upper bound**, not an expected value.
-2. **The cross-encoder is now net-negative and was not before.** It used to be the only step converting RRF's recall into ranking (+0.072 ndcg over raw fusion). With the name chunk present, raw fusion scores 0.6531 and reranking pulls it *down* to 0.6280 — and plain semantic search beats both at 0.6994. That is not acted on here: this change was about filenames, the reranker's fate deserves its own measurement, and one corpus with unusually descriptive filenames is thin evidence for deleting a component. It is flagged in CONTEXT.md § Up Next as the next thing to settle.
+2. **Indexing filenames briefly made the cross-encoder net-negative.** It used to be the only step converting RRF's recall into ranking (+0.072 ndcg over raw fusion); with the name chunk present, raw fusion scored 0.6531 and reranking pulled it *down* to 0.6280. That turned out to be fixable rather than fatal — see below.
+
+### Feeding the reranker prose, not fragments: 0.6280 → 0.6981
+
+Chasing the regression above produced the single largest configuration win in the project. The hypothesis was that the cross-encoder had gone from useful to harmful because it was **starved**: it judges relevance from the 20-token FTS snippet, and a document surfaced by its *filename* arrives carrying a keyword snippet about something else entirely.
+
+Half right. The starvation is real, but it is not about length:
+
+| passage given to the cross-encoder | ndcg@10 |
+|---|---|
+| no reranker at all (raw RRF fusion) | 0.6531 |
+| FTS snippet, 20 tokens (the old default) | 0.6280 |
+| FTS snippet, 48 / 96 / 200 tokens | 0.6161 / 0.6277 / 0.6277 |
+| best-matching vector chunk | 0.6264 |
+| **best-matching _content_ chunk** (shipping) | **0.6981** |
+
+Two things fall out of that table, and neither was the obvious guess:
+
+- **A longer snippet is worth nothing.** 20 → 200 tokens moves the metric by less than noise. An FTS snippet is a keyword-centred fragment; ten times more of it is still a fragment. What the model lacked was coherent prose, not more characters.
+- **"Best-matching chunk" is a trap once filenames are indexed.** It scores 0.6264 — no better than the snippet — because for a filename query the closest chunk is routinely *the filename chunk itself*, so the model gets handed back the same three words it already matched. Excluding name chunks from the passage (while keeping them in the ranking, which is the whole point of having them) is the entire difference between 0.6264 and 0.6981.
+
+The display snippet is unchanged: a person wants the highlighted match, a cross-encoder wants a paragraph, and they are now allowed to differ. It costs no extra query — the chunk is already in the candidate set the vector arm returned.
+
+Reranking is worth having again (+0.045 over raw fusion, restoring roughly its original margin), and hybrid+CE is back on top of the matrix.
 
 ### The headline finding: NL parsing makes retrieval *worse*
 
@@ -239,7 +263,7 @@ Latency is deliberately blank. One shipped-bundle search measured 394 ms server-
 | Packaging | PyInstaller `--onedir`, embedded in `Oasis.app/Contents/Resources/` |
 | Inference device | CPU by default (conda-forge torch, OpenBLAS); override with `OASIS_DEVICE` |
 | Eval | ranx over a labeled corpus; results appended to `eval/results/history.jsonl` |
-| Tests | pytest — **988 tests**, all passing (985 fast + 3 that load real models) |
+| Tests | pytest — **1001 tests**, all passing (998 fast + 3 that load real models) |
 
 Run them with `pixi run -e dev pytest` (fast) or `pixi run -e dev pytest -m ''` (everything).
 

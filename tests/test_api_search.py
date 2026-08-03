@@ -111,7 +111,7 @@ def client(monkeypatch, tmp_path):
     monkeypatch.setattr("oasis.api.app.load_config", lambda: OasisConfig(db_path=db_path))
     monkeypatch.setattr("oasis.api.app.SentenceTransformerEmbedder", FakeEmbedder)
     monkeypatch.setattr("oasis.api.app.CrossEncoderReranker", FakeReranker)
-    monkeypatch.setattr("oasis.api.app.ensure_ollama", lambda: None)
+    monkeypatch.setattr("oasis.api.state.ensure_ollama", lambda *a, **k: None)
     app = create_app(token=TOKEN)
     with TestClient(app, raise_server_exceptions=False) as c:
         assert app.state.oasis.ready.wait(timeout=10)
@@ -178,7 +178,7 @@ def test_limit_honored_in_hybrid(client):
 
 def test_raw_default_skips_llm(client, monkeypatch):
     llm = FakeLLM(ParsedQuery(semantic_query="WRONG — parser must not run"))
-    client.app_state.llm = llm
+    client.app_state.set_llm(llm)
     parse_calls = []
     monkeypatch.setattr(
         "oasis.api.search.parse_query",
@@ -201,7 +201,7 @@ def test_raw_false_uses_cached_llm(client):
         keywords=["tax"],
         confidence=0.9,
     )
-    client.app_state.llm = FakeLLM(canned)
+    client.app_state.set_llm(FakeLLM(canned))
 
     resp = _get(client, q="that tax PDF from 2024", raw="false")
     assert resp.status_code == 200
@@ -213,7 +213,7 @@ def test_raw_false_uses_cached_llm(client):
 
 
 def test_raw_false_llm_error_falls_back(client):
-    client.app_state.llm = FakeLLM(error=RuntimeError("inference 500"))
+    client.app_state.set_llm(FakeLLM(error=RuntimeError("inference 500")))
     resp = _get(client, q="machine learning", raw="false")
     assert resp.status_code == 200
     body = resp.json()
@@ -222,18 +222,45 @@ def test_raw_false_llm_error_falls_back(client):
     assert body["parsed"]["file_types"] == []
 
 
-def test_raw_false_no_llm_falls_back(client):
-    assert client.app_state.llm is None  # ensure_ollama() cached None at startup
+def test_raw_false_no_llm_falls_back(client, monkeypatch):
+    # ensure_ollama is patched, not merely absent: get_llm() probes lazily, so
+    # an unpatched run would shell out here and could start a real server.
+    monkeypatch.setattr("oasis.api.state.ensure_ollama", lambda *a, **k: None)
     resp = _get(client, q="machine learning", raw="false")
     assert resp.status_code == 200
     assert resp.json()["llm_parsed"] is False
 
 
+def test_llm_is_not_probed_at_startup(client, monkeypatch):
+    """The probe must not run until someone actually asks for parsing.
+
+    ``ensure_ollama()`` *starts* ``ollama serve`` when the binary is on PATH,
+    so probing at startup spun up an LLM server on every launch of an app that
+    hardcodes ``raw=true`` and can never use it.
+    """
+    probes = []
+    monkeypatch.setattr(
+        "oasis.api.state.ensure_ollama", lambda *a, **k: probes.append(1) or None
+    )
+    assert client.app_state.llm_probed is False
+
+    _get(client, q="machine learning")  # raw defaults True
+    assert probes == []
+
+    _get(client, q="machine learning", raw="false")  # now it is asked for
+    assert probes == [1]
+
+    _get(client, q="something else", raw="false")  # cached, including the None
+    assert probes == [1]
+
+
 def test_parsed_datetime_serialized_with_utc_offset(client):
-    client.app_state.llm = FakeLLM(
-        ParsedQuery(
-            semantic_query="tax",
-            date_range=DateRange(after=datetime(2024, 1, 1), before=datetime(2025, 1, 1)),
+    client.app_state.set_llm(
+        FakeLLM(
+            ParsedQuery(
+                semantic_query="tax",
+                date_range=DateRange(after=datetime(2024, 1, 1), before=datetime(2025, 1, 1)),
+            )
         )
     )
     resp = _get(client, q="tax from 2024", raw="false")

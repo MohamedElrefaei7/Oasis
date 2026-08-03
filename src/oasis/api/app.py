@@ -33,7 +33,6 @@ from oasis.config import load_config
 from oasis.index.embeddings import SentenceTransformerEmbedder
 from oasis.index.keyword import KeywordIndex
 from oasis.index.vector import VectorIndex
-from oasis.llm.manager import ensure_ollama
 from oasis.query.reranker import CrossEncoderReranker
 from oasis.query.retriever import HybridResult
 
@@ -73,9 +72,11 @@ def _load_state(state: AppState, db_override: Path | None) -> None:
         reranker = CrossEncoderReranker()
         lance_path = state.db_path.with_name(state.db_path.stem + ".lance")
         vector_index = VectorIndex(lance_path, dimension=embedder.dimension)
-        # Once, at startup — the CLI's call-per-search spawns an `ollama list`
-        # subprocess per query. Cache the result, None included.
-        llm = ensure_ollama()
+        # NOT probed here. ensure_ollama() *starts* `ollama serve` when the
+        # binary is present, so doing it at startup spun up an LLM server the
+        # user never asked for on every launch — for a feature the macOS client
+        # cannot reach, since it hardcodes raw=true. AppState.get_llm() defers
+        # it to the first request that actually wants parsing, still once.
 
         # Warm both models: load time and first-inference time are separate
         # costs (lazy kernel init, weight paging); fold both into startup.
@@ -93,7 +94,6 @@ def _load_state(state: AppState, db_override: Path | None) -> None:
         state.embedder = embedder
         state.reranker = reranker
         state.vector_index = vector_index
-        state.llm = llm
         state.status = "ready"
         state.ready.set()
     except Exception as exc:

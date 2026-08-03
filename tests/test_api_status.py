@@ -105,7 +105,7 @@ def status_client(monkeypatch):
         monkeypatch.setattr("oasis.api.app.SentenceTransformerEmbedder", FakeEmbedder)
         monkeypatch.setattr("oasis.api.app.CrossEncoderReranker", FakeReranker)
         monkeypatch.setattr("oasis.api.app.VectorIndex", FakeVectorIndex)
-        monkeypatch.setattr("oasis.api.app.ensure_ollama", lambda: None)
+        monkeypatch.setattr("oasis.api.state.ensure_ollama", lambda *a, **k: None)
         app = create_app(token=TOKEN)
         client = TestClient(app, raise_server_exceptions=False)
         client.__enter__()

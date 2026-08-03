@@ -9,7 +9,7 @@ import numpy as np
 
 from oasis.index.embeddings import EmbeddingModel
 from oasis.index.keyword import LIKE_ESCAPE, KeywordIndex, folder_like_pattern
-from oasis.index.vector import VectorIndex, VectorResult
+from oasis.index.vector import VectorIndex, VectorResult, is_name_chunk
 from oasis.query.parser import ParsedQuery
 
 logger = logging.getLogger(__name__)
@@ -27,6 +27,15 @@ class HybridResult:
     # FTS5 snippet (with MATCH_START/MATCH_END markers) when available, else raw chunk text.
     snippet: str
     score: float  # RRF score — higher is better
+    # The semantic arm's best-matching **content** chunk for this document,
+    # when it found one. **Not for display** — `snippet` is what the user sees.
+    # It exists because the cross-encoder needs a different thing than a human
+    # does: a 20-token FTS snippet is a keyword-centred fragment, and judging
+    # relevance from one is what made reranking a net *loss* once filenames
+    # started surfacing documents whose keyword snippet is unrelated to the
+    # query. Coherent prose is worth +0.070 ndcg@10; a *longer* snippet is
+    # worth nothing (measured — see README § Feeding the reranker prose).
+    rerank_text: str | None = None
 
 
 def _rrf(ranked_lists: list[list[str]]) -> dict[str, float]:
@@ -166,9 +175,19 @@ def hybrid_search(
         raise kw_error
 
     best_vec: dict[str, VectorResult] = {}
+    # The best *content* chunk per doc, tracked alongside the best chunk of any
+    # kind. Ranking wants the closest chunk full stop — often the name chunk,
+    # which is the whole point of having one. The cross-encoder wants prose,
+    # and a name chunk is the worst passage in the index to hand it. Both come
+    # out of this one pass over results we already have; no extra query.
+    best_content: dict[str, VectorResult] = {}
     for r in vec_raw:
         if r.path not in best_vec or r.score < best_vec[r.path].score:
             best_vec[r.path] = r
+        if not is_name_chunk(r.chunk_id) and (
+            r.path not in best_content or r.score < best_content[r.path].score
+        ):
+            best_content[r.path] = r
     # Re-sort ascending by score (lowest distance = most similar = rank 1).
     vec_deduped = sorted(best_vec.values(), key=lambda r: r.score)
 
@@ -200,6 +219,12 @@ def hybrid_search(
                 title=title,
                 snippet=snippet,
                 score=score,
+                # None for a keyword-only hit, or one the vector arm reached
+                # only by its name chunk; the reranker falls back to the
+                # snippet for those, which is all there is.
+                rerank_text=(
+                    content.text if (content := best_content.get(path_str)) else None
+                ),
             )
         )
 

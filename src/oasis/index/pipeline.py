@@ -13,7 +13,7 @@ from oasis.index.chunker import Chunk, chunk_document, name_chunk
 from oasis.index.db import SCHEMA_VERSION
 from oasis.index.embeddings import EmbeddingModel
 from oasis.index.keyword import KeywordIndex
-from oasis.index.vector import ChunkRow, VectorIndex
+from oasis.index.vector import ChunkRow, VectorIndex, make_chunk_id
 from oasis.index.walker import walk
 
 logger = logging.getLogger(__name__)
@@ -383,7 +383,7 @@ def index_directory(
 
         rows = [
             ChunkRow(
-                chunk_id=f"{item[0].path}:{item[1].chunk_index}",
+                chunk_id=make_chunk_id(item[0].path, item[1].chunk_index),
                 doc_id=item[0].doc_id,
                 text=item[1].text,
                 vector=vectors[j],

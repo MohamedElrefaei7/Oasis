@@ -228,7 +228,7 @@ def _client(monkeypatch, db_path: Path, embedder_dim: int = LIVE_DIM):
     monkeypatch.setattr(
         "oasis.api.app.VectorIndex", lambda db_path, dimension: FakeVectorIndex()
     )
-    monkeypatch.setattr("oasis.api.app.ensure_ollama", lambda: None)
+    monkeypatch.setattr("oasis.api.state.ensure_ollama", lambda *a, **k: None)
     app = create_app(token=TOKEN)
     client = TestClient(app, raise_server_exceptions=False)
     return app, client
@@ -336,7 +336,7 @@ def test_health_while_loading_reports_capability_fields_as_defaults(monkeypatch,
     monkeypatch.setattr("oasis.api.app.load_config", lambda: OasisConfig(db_path=db_path))
     monkeypatch.setattr("oasis.api.app.CrossEncoderReranker", FakeReranker)
     monkeypatch.setattr("oasis.api.app.VectorIndex", lambda db_path, dimension: FakeVectorIndex())
-    monkeypatch.setattr("oasis.api.app.ensure_ollama", lambda: None)
+    monkeypatch.setattr("oasis.api.state.ensure_ollama", lambda *a, **k: None)
 
     def gated_embedder():
         assert gate.wait(timeout=30)

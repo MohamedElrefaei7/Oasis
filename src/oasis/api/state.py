@@ -21,6 +21,7 @@ from oasis.index.embeddings import EmbeddingModel
 from oasis.index.keyword import KeywordIndex
 from oasis.index.vector import VectorIndex
 from oasis.llm.base import LLMProvider
+from oasis.llm.manager import ensure_ollama
 from oasis.query.reranker import CrossEncoderReranker
 
 
@@ -41,7 +42,13 @@ class AppState:
     # with no error raised. Search-during-index stays fresh only because every
     # reader shares the handle the index job writes through.
     vector_index: VectorIndex | None = None
-    llm: LLMProvider | None = None  # ensure_ollama() result, cached — including None
+    # ensure_ollama() result, cached — including None. Resolved on the first
+    # request that actually wants NL parsing, NOT at startup; see get_llm().
+    llm: LLMProvider | None = None
+    llm_probed: bool = False
+    # Serializes the one-time probe: two concurrent raw=false requests land in
+    # different threadpool threads and would otherwise both shell out.
+    llm_lock: threading.Lock = field(default_factory=threading.Lock)
     status: Literal["loading", "ready", "error"] = "loading"
     error: str | None = None
     ready: threading.Event = field(default_factory=threading.Event)
@@ -59,6 +66,44 @@ class AppState:
     job_lock: threading.Lock = field(default_factory=threading.Lock)
     # Fan-out to SSE subscribers; its event loop is bound in lifespan startup.
     broker: EventBroker = field(default_factory=EventBroker)
+
+    def get_llm(self) -> LLMProvider | None:
+        """The NL-parsing provider, probed at most once per process. May be None.
+
+        **Deliberately lazy, and the laziness is the point.** ``ensure_ollama()``
+        does not merely look: on a machine with the binary on PATH it *starts
+        ``ollama serve``* and waits up to five seconds for it. Calling that at
+        startup — which is what happened until 2026-08-02 — meant every launch
+        of the macOS app spun up a background LLM server the user never asked
+        for, left it running after Oasis quit, and paid the probe on the
+        readiness path. All for a feature that client cannot reach: the app
+        hardcodes ``raw=true``, so ``state.llm`` was never once read.
+
+        Deferring it to the first ``raw=false`` request keeps the property the
+        startup probe actually existed for — *never* per request, which would
+        spawn an ``ollama list`` subprocess per query — while making the cost
+        land only on someone who explicitly asked for parsing. ``llm_probed``
+        rather than ``llm is not None`` is what caches a negative result, so an
+        absent Ollama is not re-probed on every subsequent request.
+        """
+        if self.llm_probed:
+            return self.llm
+        with self.llm_lock:
+            if not self.llm_probed:  # Re-check: another thread may have won.
+                self.llm = ensure_ollama()
+                self.llm_probed = True
+        return self.llm
+
+    def set_llm(self, provider: LLMProvider | None) -> None:
+        """Install *provider* and mark the probe done, so it never runs.
+
+        Assigning ``state.llm`` alone is not enough and fails quietly in the
+        worst way: ``get_llm`` keys on ``llm_probed``, so an injected provider
+        would be overwritten by a real ``ensure_ollama()`` — which shells out
+        and can start a server. Tests inject through here for that reason.
+        """
+        self.llm = provider
+        self.llm_probed = True
 
     def reset_index(self) -> None:
         """Delete the index in place and stand up a fresh empty one, swapping in

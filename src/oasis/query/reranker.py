@@ -46,23 +46,41 @@ def _clean(text: str) -> str:
 
 
 def _passage(result: HybridResult) -> str:
-    """The text the cross-encoder judges: the file's name, then its snippet.
+    """The text the cross-encoder judges: the file's name, then its best prose.
 
-    Without the name this stage actively undoes the retrieval it is reranking.
-    A document found *because* its filename matched arrives here carrying a
-    content snippet that, by construction, contains none of the query terms —
-    so the cross-encoder sees an irrelevant passage and pushes it back down.
-    The two arms surface the file and the reranker buries it.
+    Two decisions here, both measured, and both about giving this model
+    something it can actually judge.
 
-    Prepending the name is also just what this class of model expects: MS MARCO
-    cross-encoders are trained on passages that lead with their title, so a
-    short leading label is in-distribution rather than a hack.
+    **The name comes first.** Without it this stage actively undoes the
+    retrieval it is reranking: a document found *because* its filename matched
+    arrives carrying a content snippet that, by construction, contains none of
+    the query terms, so the model sees an irrelevant passage and pushes it back
+    down — the two arms surface the file and the reranker buries it. Leading
+    with a short label is also in-distribution for MS MARCO cross-encoders,
+    which are trained on passages that begin with a title.
+
+    **The body is the semantic arm's best content chunk when there is one, not
+    the FTS snippet.** This is the difference between reranking being a net
+    loss and being worth having. An FTS snippet is 20 tokens centred on a
+    keyword hit — a fragment, often mid-sentence, and for a filename-only match
+    it is about something else entirely. A chunk is coherent prose. Worth
+    **+0.070 ndcg@10** (0.6280 → 0.6981), which takes reranking from *below*
+    raw fusion back to comfortably above it. Simply making the snippet longer
+    is worth **nothing** — 20/48/96/200 tokens all scored the same, because the
+    fragment's problem was never its length. Note *content* chunk: the closest
+    chunk to a filename query is frequently the name chunk itself, and handing
+    the model back the same three words is measurably no better than the
+    snippet (0.6264). Hits with no content chunk — keyword-only, or reached
+    only by name — fall back to the snippet, which is all that exists.
+
+    ``snippet`` stays the display text — a user wants the highlighted match,
+    not 500 tokens of prose. The two audiences genuinely want different things.
     """
     name = humanize_filename(result.path)
-    snippet = _clean(result.snippet)
+    body = _clean(result.rerank_text or result.snippet)
     if not name:
-        return snippet
-    return f"{name}\n{snippet}" if snippet else name
+        return body
+    return f"{name}\n{body}" if body else name
 
 
 class CrossEncoderReranker:

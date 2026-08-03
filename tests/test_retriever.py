@@ -649,3 +649,63 @@ def test_fts_failure_does_not_suppress_empty_vector_results() -> None:
     conn = _failing_conn(sqlite3.OperationalError("fts5: syntax error"))
 
     assert hybrid_search(conn, _fake_vec_index([]), _fake_embedder(), _pq("q")) == []
+
+
+# ---------------------------------------------------------------------------
+# rerank_text — prose for the cross-encoder, kept apart from the display snippet
+# ---------------------------------------------------------------------------
+
+
+def test_rerank_text_is_the_best_content_chunk() -> None:
+    """Ranking wants the closest chunk of any kind; the reranker wants prose.
+
+    For a filename query the closest chunk is routinely the name chunk, and
+    handing those few words back to the cross-encoder measured no better than
+    the snippet — so the two are tracked separately.
+    """
+    conn = _fake_conn([_kw("/docs/reef.pdf")])
+    vec = _fake_vec_index([
+        _vec("/docs/reef.pdf", chunk_id="/docs/reef.pdf:-1", text="reef", score=0.1),
+        _vec("/docs/reef.pdf", chunk_id="/docs/reef.pdf:0",
+             text="Bleaching is thermal.", score=0.4),
+    ])
+    results = hybrid_search(conn, vec, _fake_embedder(), _pq("reef"))
+    assert results[0].rerank_text == "Bleaching is thermal."
+
+
+def test_rerank_text_is_none_when_only_the_name_chunk_matched() -> None:
+    conn = _fake_conn([_kw("/docs/reef.pdf")])
+    vec = _fake_vec_index([
+        _vec("/docs/reef.pdf", chunk_id="/docs/reef.pdf:-1", text="reef", score=0.1),
+    ])
+    results = hybrid_search(conn, vec, _fake_embedder(), _pq("reef"))
+    assert results[0].rerank_text is None
+
+
+def test_rerank_text_is_none_for_a_keyword_only_hit() -> None:
+    conn = _fake_conn([_kw("/docs/only-keyword.txt")])
+    results = hybrid_search(conn, _fake_vec_index([]), _fake_embedder(), _pq("anything"))
+    assert results[0].rerank_text is None
+
+
+def test_name_chunk_still_ranks_even_though_it_is_not_the_passage() -> None:
+    # Suppressing the name chunk from the *passage* must not suppress it from
+    # retrieval — being the closest chunk is the whole point of having one.
+    conn = _fake_conn([])
+    vec = _fake_vec_index([
+        _vec("/docs/reef.pdf", chunk_id="/docs/reef.pdf:-1", text="reef", score=0.1),
+    ])
+    results = hybrid_search(conn, vec, _fake_embedder(), _pq("reef"))
+    assert [str(r.path) for r in results] == ["/docs/reef.pdf"]
+
+
+def test_display_snippet_is_unaffected_by_rerank_text() -> None:
+    # The two audiences want different things: a user wants the highlighted
+    # match, the model wants prose. Adding one must not change the other.
+    conn = _fake_conn([_kw("/docs/reef.pdf", snippet="the highlighted match")])
+    vec = _fake_vec_index([
+        _vec("/docs/reef.pdf", chunk_id="/docs/reef.pdf:0",
+             text="Bleaching is thermal.", score=0.4),
+    ])
+    results = hybrid_search(conn, vec, _fake_embedder(), _pq("coral"))
+    assert results[0].snippet == "the highlighted match"

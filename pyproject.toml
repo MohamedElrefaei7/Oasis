@@ -13,6 +13,12 @@ dependencies = [
     "instructor>=1.15.1",
     "lancedb>=0.30.2",
     "langdetect>=1.0.9",
+    # Imported directly by llm/ollama.py (an OpenAI client pointed at Ollama's
+    # /v1 endpoint), so it is a first-order dependency, not instructor's
+    # business. It resolved transitively until 2026-08-02, which works right
+    # up until instructor changes its own client stack and a bare `import
+    # openai` starts failing in a frozen bundle nobody can pip-install into.
+    "openai>=2.48.0",
     "openpyxl>=3.1.5",
     "pathspec>=1.1.1",
     "pydantic>=2.13.4",

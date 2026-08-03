@@ -414,3 +414,40 @@ def test_top_n_zero_returns_empty() -> None:
     results = [_result("/a.txt"), _result("/b.txt")]
     reranked = r.rerank("q", results, top_n=0)
     assert reranked == []
+
+
+# ---------------------------------------------------------------------------
+# The passage body: prose over fragment
+# ---------------------------------------------------------------------------
+
+
+def test_passage_prefers_the_content_chunk_over_the_snippet(
+    reranker: CrossEncoderReranker, fake_ce: MagicMock
+) -> None:
+    """A 20-token FTS fragment is what made reranking a net loss; prose fixed it."""
+    r = _result(path="/docs/reef.pdf", snippet="…ing surveys of the …")
+    r.rerank_text = "Coral bleaching is driven by sustained thermal stress on the reef."
+    reranker.rerank("coral bleaching", [r])
+    assert fake_ce.predict.call_args[0][0][0][1] == (
+        "reef\nCoral bleaching is driven by sustained thermal stress on the reef."
+    )
+
+
+def test_passage_falls_back_to_snippet_without_a_content_chunk(
+    reranker: CrossEncoderReranker, fake_ce: MagicMock
+) -> None:
+    # Keyword-only hits, and docs the vector arm reached only by their name
+    # chunk, have no prose to offer — the snippet is all that exists.
+    r = _result(path="/docs/reef.pdf", snippet="body fragment")
+    assert r.rerank_text is None
+    reranker.rerank("q", [r])
+    assert fake_ce.predict.call_args[0][0][0][1] == "reef\nbody fragment"
+
+
+def test_passage_strips_markers_from_the_fallback_snippet(
+    reranker: CrossEncoderReranker, fake_ce: MagicMock
+) -> None:
+    r = _result(path="/docs/a.txt", snippet=f"the {MATCH_START}quick{MATCH_END} fox")
+    reranker.rerank("q", [r])
+    passage = fake_ce.predict.call_args[0][0][0][1]
+    assert MATCH_START not in passage and MATCH_END not in passage

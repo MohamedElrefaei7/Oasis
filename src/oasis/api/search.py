@@ -53,9 +53,10 @@ def _parse(q: str, raw: bool, state: AppState) -> tuple[ParsedQuery, bool]:
     """
     if raw:
         return _fallback_query(q), False
-    # Cached provider from startup — never ensure_ollama() per request, which
-    # would spawn an `ollama list` subprocess per query.
-    llm = state.llm
+    # Probed on first use and cached for the process — never per request, which
+    # would spawn an `ollama list` subprocess per query, and never at startup,
+    # which would start an Ollama server for a caller who may never ask.
+    llm = state.get_llm()
     if llm is None:
         return _fallback_query(q), False
     try:

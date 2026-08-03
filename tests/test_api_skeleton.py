@@ -55,7 +55,7 @@ def _patch_models(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     monkeypatch.setattr("oasis.api.app.SentenceTransformerEmbedder", FakeEmbedder)
     monkeypatch.setattr("oasis.api.app.CrossEncoderReranker", FakeReranker)
     monkeypatch.setattr("oasis.api.app.VectorIndex", FakeVectorIndex)
-    monkeypatch.setattr("oasis.api.app.ensure_ollama", lambda: None)
+    monkeypatch.setattr("oasis.api.state.ensure_ollama", lambda *a, **k: None)
     return db_path
 
 

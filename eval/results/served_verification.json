@@ -23,18 +23,18 @@
     "raw": true
   },
   "direct": {
-    "precision@5": 0.225,
-    "precision@10": 0.1338,
-    "recall@10": 0.6844,
-    "mrr": 0.5427,
-    "ndcg@10": 0.5602
+    "precision@5": 0.2625,
+    "precision@10": 0.1475,
+    "recall@10": 0.7713,
+    "mrr": 0.7066,
+    "ndcg@10": 0.6981
   },
   "served": {
-    "precision@5": 0.225,
-    "precision@10": 0.1338,
-    "recall@10": 0.6844,
-    "mrr": 0.5427,
-    "ndcg@10": 0.5602
+    "precision@5": 0.2625,
+    "precision@10": 0.1475,
+    "recall@10": 0.7713,
+    "mrr": 0.7066,
+    "ndcg@10": 0.6981
   },
   "delta": {
     "precision@5": 0.0,

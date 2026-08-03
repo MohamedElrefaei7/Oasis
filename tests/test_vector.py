@@ -8,12 +8,15 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
+from oasis.index.chunker import NAME_CHUNK_INDEX
 from oasis.index.vector import (
     _TABLE_NAME,
     ChunkRow,
     VectorIndex,
     VectorResult,
     _build_schema,
+    is_name_chunk,
+    make_chunk_id,
 )
 
 # ---------------------------------------------------------------------------
@@ -516,3 +519,27 @@ def test_integration_persist_across_open(tmp_path: Path) -> None:
 
     idx2 = VectorIndex(db_path, dimension=DIM)
     assert idx2.count() == 1
+
+
+# ---------------------------------------------------------------------------
+# chunk_id format — writers and readers must agree
+# ---------------------------------------------------------------------------
+
+
+def test_make_chunk_id_composes_path_and_index() -> None:
+    assert make_chunk_id("/docs/a.txt", 0) == "/docs/a.txt:0"
+
+
+def test_name_chunk_is_recognized() -> None:
+    assert is_name_chunk(make_chunk_id("/docs/a.txt", NAME_CHUNK_INDEX))
+
+
+def test_content_chunks_are_not_name_chunks() -> None:
+    assert not is_name_chunk(make_chunk_id("/docs/a.txt", 0))
+    assert not is_name_chunk(make_chunk_id("/docs/a.txt", 12))
+
+
+def test_a_path_ending_in_the_sentinel_is_not_a_name_chunk() -> None:
+    # The suffix check must key on the separator, not on the digits: a file
+    # genuinely named "-1" would otherwise read as every doc's name chunk.
+    assert not is_name_chunk(make_chunk_id("/docs/-1", 3))

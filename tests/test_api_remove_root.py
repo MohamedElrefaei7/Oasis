@@ -74,7 +74,7 @@ def client(monkeypatch, tmp_path):
     monkeypatch.setattr("oasis.api.app.load_config", lambda: OasisConfig(db_path=db_path))
     monkeypatch.setattr("oasis.api.app.SentenceTransformerEmbedder", FakeEmbedder)
     monkeypatch.setattr("oasis.api.app.CrossEncoderReranker", FakeReranker)
-    monkeypatch.setattr("oasis.api.app.ensure_ollama", lambda: None)
+    monkeypatch.setattr("oasis.api.state.ensure_ollama", lambda *a, **k: None)
     app = create_app(token=TOKEN)
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

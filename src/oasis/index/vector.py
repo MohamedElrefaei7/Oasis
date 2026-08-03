@@ -7,7 +7,29 @@ import lancedb
 import numpy as np
 import pyarrow as pa
 
+from oasis.index.chunker import NAME_CHUNK_INDEX
+
 _TABLE_NAME = "chunks"
+
+
+def make_chunk_id(path: str, chunk_index: int) -> str:
+    """The vector store's primary key: one document's path plus a chunk index.
+
+    Centralized here, with ``is_name_chunk``, so the format is defined in one
+    place — writers build it and readers pick it apart, and those two agreeing
+    is not something the schema enforces.
+    """
+    return f"{path}:{chunk_index}"
+
+
+def is_name_chunk(chunk_id: str) -> bool:
+    """Whether *chunk_id* identifies a filename chunk rather than real content.
+
+    Retrieval needs to tell them apart: a name chunk is a handful of words and
+    the best thing in the index for a filename query, but the *worst* thing to
+    hand a cross-encoder, which needs prose to judge relevance from.
+    """
+    return chunk_id.endswith(f":{NAME_CHUNK_INDEX}")
 
 
 @dataclass
