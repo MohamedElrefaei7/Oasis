@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from oasis.extractors.registry import get_extractor
-from oasis.index.chunker import Chunk, chunk_document
+from oasis.index.chunker import Chunk, chunk_document, name_chunk
 from oasis.index.db import SCHEMA_VERSION
 from oasis.index.embeddings import EmbeddingModel
 from oasis.index.keyword import KeywordIndex
@@ -323,7 +323,15 @@ def index_directory(
         if do_embed:
             doc_id = idx.get_doc_id(doc.path)
             if doc_id is not None:
+                # The name chunk goes first and is not conditional on there
+                # being any content: a file whose text won't extract (a scanned
+                # PDF, an empty sheet) used to produce zero chunks and was
+                # invisible to the semantic arm entirely. Now it is at least
+                # findable by what the user called it.
                 chunks = chunk_document(doc.text)
+                by_name = name_chunk(doc.path)
+                if by_name is not None:
+                    chunks.insert(0, by_name)
                 if chunks:
                     pending.append(
                         _PendingDoc(

@@ -6,7 +6,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from oasis.index.db import SCHEMA_VERSION
+from oasis.index.db import FTS_COL_CONTENT, SCHEMA_VERSION
+from oasis.index.filename import humanize_filename
 from oasis.models import ExtractedDocument
 
 
@@ -42,6 +43,36 @@ def folder_like_pattern(folder: str) -> str:
         .replace("_", LIKE_ESCAPE + "_")
     )
     return f"{escaped}{os.sep}%"
+
+# BM25 column weights, in documents_fts column order: filename, path, title,
+# content. FTS5's default is 1.0 across the board, and that default is what
+# made a file *named* `paper-okapi-at-trec3.pdf` rank below a paper that merely
+# cites Okapi in its body: one hit in a 40-word column and one hit in a
+# 40,000-word column counted the same.
+#
+#   filename  the strongest signal in the index and the cheapest to trust — it
+#             is the one piece of metadata a person chose, and short enough
+#             that a hit in it is nearly always about the document.
+#   path      the same tokens plus every ancestor directory, so it is kept only
+#             as a weak folder-name signal. Weighting it like a filename would
+#             mean every document under ~/Documents/work scores on "work".
+#   title     chosen text too, but frequently absent or boilerplate
+#             ("PowerPoint Presentation"), so it sits between the two.
+#   content   the baseline everything else is expressed relative to.
+#
+# **These numbers are worth almost nothing end-to-end, and the measurement says
+# so.** Swept over the 83-query eval set from flat 1.0 to 32× filename, and
+# including dropping `path` to 0.0, every setting scored *identically* in
+# hybrid mode: ndcg@10 0.6280 across the board. RRF consumes only the keyword
+# arm's rank *order*, and the cross-encoder then re-scores the top 20 from
+# scratch, so reordering inside the candidate pool is invisible unless it
+# changes which documents make the pool at all.
+#
+# They are kept because `--mode keyword` is a real user-selectable path with
+# no reranker downstream to wash them out, and there they do help: ndcg@10
+# 0.1776 → 0.1835, mrr 0.1942 → 0.2025. Treat the exact values as arbitrary
+# within a wide band; do not tune them expecting hybrid to move.
+BM25_WEIGHTS = (8.0, 0.4, 2.0, 1.0)
 
 # Non-printable sentinels passed to snippet() via SQLite's char() function.
 # char(2)/char(3) in the SQL avoids any string interpolation in the query.
@@ -120,10 +151,11 @@ class KeywordIndex:
         self._conn.execute(
             """
             INSERT INTO documents
-                (path, extension, size, mtime, indexed_at, content_hash,
+                (path, filename, extension, size, mtime, indexed_at, content_hash,
                  language, title, content, metadata_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(path) DO UPDATE SET
+                filename      = excluded.filename,
                 extension     = excluded.extension,
                 size          = excluded.size,
                 mtime         = excluded.mtime,
@@ -136,6 +168,7 @@ class KeywordIndex:
             """,
             (
                 str(doc.path),
+                humanize_filename(doc.path),
                 doc.path.suffix.lower(),
                 m.size_bytes,
                 m.mtime,
@@ -236,6 +269,14 @@ class KeywordIndex:
         params.append(limit)
         where_extra = "".join(f"\n  AND {clause}" for clause in extra)
 
+        # bm25() rather than the bare `rank` column: same function, but with
+        # explicit per-column weights instead of FTS5's flat 1.0 (see
+        # BM25_WEIGHTS). Both are negative and sort ascending, so ORDER BY is
+        # unchanged and callers still negate to get higher-is-better.
+        # The weights are formatted into the SQL because FTS5 requires bm25()'s
+        # weight arguments to be literals — they are module constants, never
+        # user input, and are floats by construction.
+        weights = ", ".join(f"{w:f}" for w in BM25_WEIGHTS)
         # char(2)/char(3) produce MATCH_START/MATCH_END without string interpolation.
         rows = self._conn.execute(
             f"""
@@ -243,8 +284,8 @@ class KeywordIndex:
                 d.id,
                 d.path,
                 d.title,
-                snippet(documents_fts, 2, char(2), char(3), '…', 20) AS snippet,
-                documents_fts.rank AS rank
+                snippet(documents_fts, {FTS_COL_CONTENT}, char(2), char(3), '…', 20) AS snippet,
+                bm25(documents_fts, {weights}) AS rank
             FROM documents_fts
             JOIN documents d ON d.id = documents_fts.rowid
             WHERE documents_fts MATCH ?{where_extra}

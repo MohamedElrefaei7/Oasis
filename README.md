@@ -20,7 +20,8 @@ Most built-in OS search indexes shallowly and ranks poorly. `grep` can't help wh
 
 | Piece | State |
 |---|---|
-| Extraction, keyword index, vector index, hybrid retrieval + rerank | **Done**, measured, 939 tests |
+| Extraction, keyword index, vector index, hybrid retrieval + rerank | **Done**, measured, 988 tests |
+| Filename search | **Done** (2026-08-02) — names are their own weighted FTS column *and* their own embedded chunk; **+0.068 ndcg@10**. See [Measured results](#measured-results) |
 | Evaluation harness (`eval/`) | **Done** — 300-file labeled corpus, 83 queries, reproducible matrix |
 | Natural-language query parsing | **Built, and disabled by default** — the eval measured it as a **−0.108 ndcg@10 regression**. See [Measured results](#measured-results) |
 | Local HTTP API (`oasis serve`) | **Done** — every endpoint implemented, served rankings verified byte-identical to the eval harness |
@@ -93,6 +94,11 @@ Building it: open `app/Oasis/Oasis.xcodeproj` and Run. Dev builds spawn the serv
   │  + FTS5   │       │  vectors  │
   │  BM25     │       │  cosine   │
   │  + filter │       │  + filter │
+  ├───────────┤       ├───────────┤
+  │ filename  │       │ filename  │
+  │ path      │       │ content   │
+  │ title     │       │ chunks    │
+  │ content   │       │           │
   └───────────┘       └───────────┘
         │                   │
         └────────┬──────────┘
@@ -116,6 +122,7 @@ Every component runs completely locally — embeddings, LLM, and storage. No tel
 ## Features
 
 - **Three search modes** — keyword (BM25 with porter stemming), semantic (dense vectors), or hybrid (RRF fusion + cross-encoder rerank). Pick with `--mode`.
+- **Filenames are searched too, in both arms** — the name is split into real words (`Q3ReportFinal.pdf` → `Q3 Report Final`, `trec3` → `trec 3`), indexed as its own weighted FTS column, *and* embedded as its own vector chunk. So a file whose name is the only place your search term appears still comes back — including files with no extractable text at all, like a scanned PDF, which were previously invisible to semantic search.
 - **Natural language queries** — semantic + hybrid retrieval understands a plain English sentence directly. There is *also* a local-LLM parsing layer (Ollama, `llama3.2:3b`) that extracts file types, date ranges, and folder hints into a typed schema — it's built and tested, but it's off by default because it measured worse (see below).
 - **Incremental indexing** — `(size, mtime)` hash skips files that haven't changed since the last run. Deleted files are reconciled out of all three stores on the next pass; documents indexed before the vector store existed get their embeddings backfilled without `--force`.
 - **Format coverage** — `.txt`, `.md`, `.pdf`, `.docx`, `.pptx`, `.xlsx`, `.csv`. Partial-success extraction means one corrupted page doesn't lose the whole document (Which is quite often the case).
@@ -161,22 +168,42 @@ Every component runs completely locally — embeddings, LLM, and storage. No tel
 
 Every claim below is reproducible with `eval/run_eval.py` over a 300-file labeled corpus and 83 queries (80 scored, 3 expected-empty), with `today` pinned to `2026-07-07`.
 
-**Retrieval matrix** (raw mode, 2026-07-14, pre-migration stack — all four rows measured together, so they're comparable to each other):
+**Retrieval matrix** (raw mode, 2026-08-02, all rows measured together on the shipped stack so they're comparable to each other):
 
-| mode | ndcg@10 | mrr | recall@10 | p@5 | p@10 |
-|---|---|---|---|---|---|
-| keyword (BM25) | 0.1768 | 0.1931 | 0.1792 | 0.0600 | 0.0312 |
-| semantic (vector) | 0.4937 | 0.4950 | 0.6167 | 0.1950 | 0.1200 |
-| hybrid (RRF) | 0.4884 | 0.4632 | 0.6500 | 0.1975 | 0.1275 |
-| **hybrid + CE rerank** | **0.5602** | **0.5427** | **0.6844** | **0.2250** | **0.1338** |
+| mode | ndcg@10 | mrr | recall@10 | p@5 |
+|---|---|---|---|---|
+| keyword (BM25) | 0.1835 | 0.2025 | 0.1792 | 0.0625 |
+| hybrid (RRF) | 0.6531 | 0.6317 | **0.7963** | 0.2650 |
+| **hybrid + CE rerank** (shipping) | 0.6280 | 0.6331 | 0.7442 | 0.2300 |
+| semantic (vector) | **0.6994** | **0.7177** | 0.7817 | **0.2700** |
 
-The current canonical on the shipped stack (pixi / conda-forge torch / OpenBLAS / CPU) restates the best row as **ndcg@10 0.5601, mrr 0.5427, recall@10 0.6844** — two of 80 queries reordered inside their top-10 and nothing else moved.
+**The keyword row is a strawman** — raw mode feeds a whole sentence to FTS5, which ANDs every term, so most keyword queries return nothing. The keyword-vs-hybrid gap is inflated and shouldn't be quoted.
 
-Two things that table shows: **the cross-encoder is doing real work** (it's the only step that converts RRF's better recall into better ranking, +0.072 ndcg over raw fusion), and **the keyword row is a strawman** — raw mode feeds a whole sentence to FTS5, which ANDs every term, so 62 of 80 keyword queries return nothing. The keyword-vs-hybrid gap is inflated and shouldn't be quoted.
+### Indexing filenames: +0.068 ndcg@10, and it's all in one place
+
+Until 2026-08-02 a filename was only reachable as part of the raw absolute path in one unweighted FTS column, and the semantic arm never saw it at all. Three things changed — a `filename` FTS column holding the *humanized* name (camelCase and letter/digit boundaries split, directories and extension dropped), that same text embedded as **its own vector chunk**, and the cross-encoder shown the name alongside the snippet. Ablated one at a time from the old configuration:
+
+| configuration | ndcg@10 | recall@10 | mrr |
+|---|---|---|---|
+| before (flat weights, no name chunk, name-blind reranker) | 0.5601 | 0.6844 | 0.5427 |
+| + BM25 column weights | 0.5601 | 0.6844 | 0.5427 |
+| + filename vector chunk | 0.6169 | 0.7567 | 0.6039 |
+| + name-aware reranker (shipping) | **0.6280** | 0.7442 | **0.6331** |
+
+**The vector chunk is the entire effect.** In the semantic arm alone it is worth **+0.206 ndcg@10** (0.4939 → 0.6994) — by far the largest single retrieval change ever measured in this project. The BM25 column weights, by contrast, changed **nothing**: swept from flat 1.0 to 32× filename, including dropping the path column to zero, every setting produced identical hybrid numbers, because RRF consumes only rank order and the cross-encoder re-scores the top 20 from scratch. They are kept only for `--mode keyword`, which has no reranker downstream and does improve (0.1776 → 0.1835).
+
+**It is not a uniform improvement: 25 of 80 queries got better, 19 got worse, 36 didn't move.** The gains are large and the losses are small, which is why the average moves so far, but the losses have a shape worth knowing. Filenames help when a name is *distinctive* (`anscombe quartet`, `excel file tracking marathon training`, and every `filename-only` query — that tag went 0.3155 → **1.0000**; the `csv` tag, whose files have descriptive names and unreadable bodies, went 0.3385 → 0.6942). They hurt when many files share a name prefix and something *other than the name* is meant to discriminate: `"contracts from 2023"` has seven `contract-*.docx` files that now all match strongly on the name, crowding out the two the date labels want — and in raw mode there is no date filter to break the tie. Boosting names necessarily boosts near-duplicates that share one.
+
+Two honest caveats:
+
+1. **The eval corpus flatters this change.** Its filenames were authored to be self-describing (`manual-espresso-machine-em500.pdf`, `paper-okapi-at-trec3.pdf`). Real directories are full of `Document (1).pdf` and `IMG_4032.HEIC`, where a filename carries no signal, so **+0.206 is an upper bound**, not an expected value.
+2. **The cross-encoder is now net-negative and was not before.** It used to be the only step converting RRF's recall into ranking (+0.072 ndcg over raw fusion). With the name chunk present, raw fusion scores 0.6531 and reranking pulls it *down* to 0.6280 — and plain semantic search beats both at 0.6994. That is not acted on here: this change was about filenames, the reranker's fate deserves its own measurement, and one corpus with unusually descriptive filenames is thin evidence for deleting a component. It is flagged in CONTEXT.md § Up Next as the next thing to settle.
 
 ### The headline finding: NL parsing makes retrieval *worse*
 
 The project was premised on the bet that an LLM parsing queries into structured filters would beat feeding the sentence to hybrid retrieval. **The eval measured that bet and it lost.**
+
+Measured 2026-07-14, **before filenames were indexed** — both columns predate that change, so the Δ is still a fair comparison but the absolute values are the old ones:
 
 | mode | ndcg@10 raw | ndcg@10 parsed | Δ |
 |---|---|---|---|
@@ -212,7 +239,7 @@ Latency is deliberately blank. One shipped-bundle search measured 394 ms server-
 | Packaging | PyInstaller `--onedir`, embedded in `Oasis.app/Contents/Resources/` |
 | Inference device | CPU by default (conda-forge torch, OpenBLAS); override with `OASIS_DEVICE` |
 | Eval | ranx over a labeled corpus; results appended to `eval/results/history.jsonl` |
-| Tests | pytest — **939 tests**, all passing (936 fast + 3 that load real models) |
+| Tests | pytest — **988 tests**, all passing (985 fast + 3 that load real models) |
 
 Run them with `pixi run -e dev pytest` (fast) or `pixi run -e dev pytest -m ''` (everything).
 

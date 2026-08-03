@@ -6,7 +6,7 @@ A natural-language file search tool with hybrid keyword + semantic retrieval.
 - Python 3.14, managed with **pixi** (`pixi.toml` + `pixi.lock`; `requires-python = ">=3.14"`, ruff targets `py314` — keep these in sync). `pixi install`, `pixi run -e dev pytest`, `pixi run oasis …`. Two environments: `default` (runtime only — the PyInstaller freeze target) and `dev` (adds the `test`/`eval`/`build` features), sharing one solve-group so versions can't drift between what's tested and what ships.
 - **torch comes from conda-forge, not PyPI, and this is not interchangeable.** Every stock macOS-arm64 wheel links Apple's Accelerate, whose SGEMV path returns all-NaN cross-encoder logits on realistic batch shapes (silently — NaN scores don't raise, and sorting on NaN keys leaves order untouched, so the reranker degrades to no-op with no error). conda-forge links OpenBLAS (`BLAS_INFO=open`). Never move torch to the PyPI half of `pixi.toml`.
 - **Inference runs on CPU by default** (`oasis/device.py`, `OASIS_DEVICE` to override). MPS aborts under Metal validation when `oasis serve` is spawned by a GUI parent, which is unfixable across arbitrary Macs; CPU is portable and, on OpenBLAS, measured metric-identical to MPS.
-- SQLite + FTS5 for keyword index and metadata
+- SQLite + FTS5 for keyword index and metadata — four weighted columns (`filename`, `path`, `title`, `content`), schema v3
 - LanceDB for vector store
 - sentence-transformers (all-MiniLM-L6-v2) for embeddings
 - Ollama (local) for natural language query parsing — **local only**. The Anthropic API path was removed; `anthropic` is not a dependency and there is no `llm/claude.py`. Do not reintroduce a cloud provider: running entirely offline is a product requirement, not an implementation detail.
@@ -36,6 +36,10 @@ A natural-language file search tool with hybrid keyword + semantic retrieval.
 - Don't write to the database directly from CLI handlers — go through the index layer.
 - Don't build a second copy of something the other front-end already has. The CLI and the API share `run_search`; the Swift view models share `OasisAPI`; `/api/health` and `/api/status` share `IndexCapabilities`. Each of those was two copies once, and each pair had silently drifted before it was merged.
 - Don't filter paths with a bare SQL `LIKE 'prefix%'`. `_` and `%` are wildcards and are legal in filenames, and a prefix with no trailing separator matches sibling directories. Use `KeywordIndex.folder_like_pattern()` (with `ESCAPE`), or filter in Python like `docs_under`.
+- Don't normalize a filename anywhere except `index/filename.py`. The FTS column, the embedded name chunk, and the reranker passage all have to agree on what a filename says; a second implementation is a silent disagreement between the arm that finds a file and the arm that ranks it.
+- Don't change the `documents_fts` column order without moving `FTS_COL_*` with it. `snippet()` and `bm25()` address columns **by number**, and SQLite will not complain if the number now points somewhere else — you get snippets of the wrong column and weights on the wrong one, silently.
+- Don't add a column to `documents` or `documents_fts` without a `_migrate` step. `_SCHEMA` is all `CREATE ... IF NOT EXISTS`, so on an existing index it is entirely a no-op — the old triggers survive, reference a column the FTS table doesn't have, and the next insert takes indexing down.
+- Don't tune `BM25_WEIGHTS` expecting hybrid search to respond. Measured: every setting from flat 1.0 to 32× filename scores identically, because RRF uses only rank order and the cross-encoder re-scores the top 20. They exist for `--mode keyword`.
 
 ## HTTP API
 

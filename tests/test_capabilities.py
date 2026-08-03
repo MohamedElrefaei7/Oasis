@@ -157,7 +157,7 @@ def test_capabilities_after_indexing_with_embedder(tmp_path, corpus):
     assert stats["indexed"] == 2
 
     caps = KeywordIndex(conn).get_capabilities()
-    assert caps.schema_version == SCHEMA_VERSION == 2
+    assert caps.schema_version == SCHEMA_VERSION
     assert caps.vectors_built is True
     assert caps.embedding_model == "fake-minilm"
     assert caps.embedding_dimension == LIVE_DIM

@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from oasis.device import resolve_device
+from oasis.index.filename import humanize_filename
 from oasis.index.keyword import MATCH_END, MATCH_START
 from oasis.query.retriever import HybridResult
 
@@ -44,6 +45,26 @@ def _clean(text: str) -> str:
     return text.replace(MATCH_START, "").replace(MATCH_END, "")
 
 
+def _passage(result: HybridResult) -> str:
+    """The text the cross-encoder judges: the file's name, then its snippet.
+
+    Without the name this stage actively undoes the retrieval it is reranking.
+    A document found *because* its filename matched arrives here carrying a
+    content snippet that, by construction, contains none of the query terms —
+    so the cross-encoder sees an irrelevant passage and pushes it back down.
+    The two arms surface the file and the reranker buries it.
+
+    Prepending the name is also just what this class of model expects: MS MARCO
+    cross-encoders are trained on passages that lead with their title, so a
+    short leading label is in-distribution rather than a hack.
+    """
+    name = humanize_filename(result.path)
+    snippet = _clean(result.snippet)
+    if not name:
+        return snippet
+    return f"{name}\n{snippet}" if snippet else name
+
+
 class CrossEncoderReranker:
     def __init__(self, model_name: str = DEFAULT_CE_MODEL, device: str | None = None) -> None:
         # Defaults to CPU. This is the model whose first real inference aborts
@@ -67,7 +88,7 @@ class CrossEncoderReranker:
         if not results:
             return []
 
-        pairs = [(query, _clean(r.snippet)) for r in results]
+        pairs = [(query, _passage(r)) for r in results]
         raw = self._model.predict(pairs, show_progress_bar=False)
         scores = np.atleast_1d(np.asarray(raw, dtype=np.float32))
 

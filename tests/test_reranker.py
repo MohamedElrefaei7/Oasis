@@ -310,15 +310,45 @@ def test_predict_query_is_first_in_each_pair(
     assert all(p[0] == "my query" for p in pairs)
 
 
-def test_predict_snippet_is_second_in_each_pair(
+def test_predict_passage_is_second_in_each_pair(
     reranker: CrossEncoderReranker, fake_ce: MagicMock
 ) -> None:
     results = [_result(snippet="text A"), _result(snippet="text B"), _result(snippet="text C")]
     reranker.rerank("q", results)
     pairs = fake_ce.predict.call_args[0][0]
-    assert pairs[0][1] == "text A"
-    assert pairs[1][1] == "text B"
-    assert pairs[2][1] == "text C"
+    # The passage leads with the file's own name (_result defaults to /doc.txt).
+    assert pairs[0][1] == "doc\ntext A"
+    assert pairs[1][1] == "doc\ntext B"
+    assert pairs[2][1] == "doc\ntext C"
+
+
+def test_predict_passage_leads_with_the_humanized_filename(
+    reranker: CrossEncoderReranker, fake_ce: MagicMock
+) -> None:
+    """Without this, reranking undoes the retrieval that found the file.
+
+    A filename-only match arrives carrying a content snippet that by
+    construction contains none of the query terms, so a name-blind
+    cross-encoder scores it as irrelevant and buries it.
+    """
+    reranker.rerank("okapi", [_result(path="/docs/paper-okapi-at-trec3.pdf", snippet="body")])
+    passage = fake_ce.predict.call_args[0][0][0][1]
+    assert passage == "paper okapi at trec 3\nbody"
+
+
+def test_predict_passage_is_name_only_when_snippet_is_empty(
+    reranker: CrossEncoderReranker, fake_ce: MagicMock
+) -> None:
+    # No stray leading newline for a file with no extractable text.
+    reranker.rerank("q", [_result(path="/docs/scan.pdf", snippet="")])
+    assert fake_ce.predict.call_args[0][0][0][1] == "scan"
+
+
+def test_predict_passage_is_snippet_only_when_name_has_no_words(
+    reranker: CrossEncoderReranker, fake_ce: MagicMock
+) -> None:
+    reranker.rerank("q", [_result(path="/docs/---.txt", snippet="body text")])
+    assert fake_ce.predict.call_args[0][0][0][1] == "body text"
 
 
 def test_predict_markers_stripped_from_snippet() -> None:

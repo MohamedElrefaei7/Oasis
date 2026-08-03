@@ -329,3 +329,93 @@ def test_search_folders_does_not_match_the_folder_itself(conn: sqlite3.Connectio
 
     paths = [str(r.path) for r in idx.search("alpha", folders=["/tmp/a"])]
     assert paths == ["/tmp/a/inside.txt"]
+
+
+# ---------------------------------------------------------------------------
+# Filename search and BM25 column weighting
+# ---------------------------------------------------------------------------
+
+
+def test_upsert_stores_the_humanized_filename(conn: sqlite3.Connection) -> None:
+    KeywordIndex(conn).upsert(_doc(path="/docs/paper-okapi-at-trec3.pdf"))
+    row = conn.execute("SELECT filename FROM documents").fetchone()
+    assert row["filename"] == "paper okapi at trec 3"
+
+
+def test_finds_a_word_that_exists_only_in_the_filename(conn: sqlite3.Connection) -> None:
+    idx = KeywordIndex(conn)
+    idx.upsert(_doc(path="/docs/seaborn-anscombe.csv", text="x,y\n10,8.04\n8,6.95"))
+    assert [r.path for r in idx.search("anscombe")] == [Path("/docs/seaborn-anscombe.csv")]
+
+
+def test_finds_a_camel_case_filename_word(conn: sqlite3.Connection) -> None:
+    # unicode61 alone leaves `Q3ReportFinal` as one opaque token that no
+    # reasonable query matches; the humanizer is what splits it.
+    idx = KeywordIndex(conn)
+    idx.upsert(_doc(path="/docs/Q3ReportFinal.pdf", text="unrelated body"))
+    assert len(idx.search("report")) == 1
+
+
+def test_finds_a_digit_suffixed_filename_word(conn: sqlite3.Connection) -> None:
+    idx = KeywordIndex(conn)
+    idx.upsert(_doc(path="/docs/paper-okapi-at-trec3.pdf", text="unrelated body"))
+    assert len(idx.search("trec")) == 1
+
+
+def test_filename_match_outranks_a_passing_body_mention(conn: sqlite3.Connection) -> None:
+    """The regression this weighting exists for.
+
+    Under FTS5's flat 1.0 default, a file *named* for the term ranked below a
+    long document that merely cites it: one hit in a 40-word column and one hit
+    in a 40,000-word column scored the same.
+    """
+    idx = KeywordIndex(conn)
+    idx.upsert(_doc(path="/docs/paper-okapi-at-trec3.pdf", text="a study of ranking " * 200))
+    idx.upsert(_doc(
+        path="/docs/paper-graph-of-word.pdf",
+        text="we compare against okapi bm25 in passing. " + "filler text here. " * 200,
+    ))
+    assert idx.search("okapi")[0].path == Path("/docs/paper-okapi-at-trec3.pdf")
+
+
+def test_directory_names_stay_weak_against_filenames(conn: sqlite3.Connection) -> None:
+    """The `path` column keeps folder search working but must not compete.
+
+    Weighted like a filename, every document under ~/Documents/work would
+    score on the query "work".
+    """
+    idx = KeywordIndex(conn)
+    idx.upsert(_doc(path="/home/work/notes.txt", text="body"))
+    idx.upsert(_doc(path="/home/misc/work.txt", text="body"))
+    assert idx.search("work")[0].path == Path("/home/misc/work.txt")
+
+
+def test_folder_name_is_still_searchable(conn: sqlite3.Connection) -> None:
+    idx = KeywordIndex(conn)
+    idx.upsert(_doc(path="/home/taxes/scan.pdf", text="body"))
+    assert len(idx.search("taxes")) == 1
+
+
+def test_extension_is_not_searchable_as_a_filename_word(conn: sqlite3.Connection) -> None:
+    """`pdf` must not let every PDF outrank documents genuinely about PDFs.
+
+    The extension is a structured field twice over (documents.extension and
+    the file_types filter), so it is dropped from the filename text. It stays
+    in the low-weighted `path` column, which is why this asserts on ranking
+    rather than on absence.
+    """
+    idx = KeywordIndex(conn)
+    idx.upsert(_doc(path="/docs/holiday.pdf", text="beaches and sunshine"))
+    idx.upsert(_doc(path="/docs/notes.txt", text="how the pdf format stores fonts"))
+    assert idx.search("pdf")[0].path == Path("/docs/notes.txt")
+
+
+def test_reindexing_a_document_refreshes_its_filename(conn: sqlite3.Connection) -> None:
+    # upsert's ON CONFLICT branch has to carry `filename` too, or a migrated
+    # index would keep a backfilled value forever.
+    idx = KeywordIndex(conn)
+    idx.upsert(_doc(path="/docs/a.txt", text="body"))
+    conn.execute("UPDATE documents SET filename = 'stale'")
+    conn.commit()
+    idx.upsert(_doc(path="/docs/a.txt", text="body changed", mtime=2000.0))
+    assert conn.execute("SELECT filename FROM documents").fetchone()["filename"] == "a"

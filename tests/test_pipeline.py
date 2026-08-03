@@ -298,8 +298,8 @@ def test_chunks_stat_equals_chunks_produced(
         vector_index=_fake_vector_index(),
         embedder=_fake_embedder(),
     )
-    # "hello world" is a short text → exactly 1 chunk
-    assert stats["chunks"] == 1
+    # "hello world" is a short text → 1 content chunk, plus the filename chunk
+    assert stats["chunks"] == 2
 
 
 def test_chunks_stat_sums_across_docs(
@@ -312,7 +312,8 @@ def test_chunks_stat_sums_across_docs(
         vector_index=_fake_vector_index(),
         embedder=_fake_embedder(),
     )
-    assert stats["chunks"] == 2
+    # One content chunk and one filename chunk each.
+    assert stats["chunks"] == 4
 
 
 # ---------------------------------------------------------------------------

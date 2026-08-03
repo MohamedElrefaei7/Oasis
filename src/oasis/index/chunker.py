@@ -1,9 +1,18 @@
 from dataclasses import dataclass
+from pathlib import Path
 
 import tiktoken
 
+from oasis.index.filename import humanize_filename
+
 CHUNK_SIZE = 500
 OVERLAP = 50
+
+# The filename chunk's index. Negative so it can never collide with a content
+# chunk (``chunk_document`` numbers from 0), which matters because the chunk
+# index is half of the vector store's primary key — a collision would have one
+# chunk silently overwriting the other on upsert.
+NAME_CHUNK_INDEX = -1
 
 ENCODING_NAME = "cl100k_base"
 
@@ -43,6 +52,30 @@ class Chunk:
     chunk_index: int
     text: str
     token_count: int
+
+
+def name_chunk(path: Path | str) -> Chunk | None:
+    """The document's own name, as a chunk to embed. ``None`` if it has no words.
+
+    Content chunks can only ever match what is *inside* a file, which leaves
+    the semantic arm blind to the thing users most often remember: what they
+    called it. Embedding the humanized name as its own chunk — rather than
+    prepending it to chunk 0 — keeps it from diluting a real passage's
+    embedding, and lets the per-document dedup in retrieval pick it only when
+    it genuinely is the closest thing in the file to the query.
+
+    It also gives the vector arm a foothold in files that have no extractable
+    text at all (an image-only PDF, an empty spreadsheet). Those produced zero
+    chunks and were unreachable semantically; now they are findable by name.
+    """
+    text = humanize_filename(path)
+    if not text:
+        return None
+    return Chunk(
+        chunk_index=NAME_CHUNK_INDEX,
+        text=text,
+        token_count=len(encoding().encode(text)),
+    )
 
 
 def chunk_document(

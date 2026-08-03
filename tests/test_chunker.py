@@ -2,7 +2,15 @@
 
 import pytest
 
-from oasis.index.chunker import CHUNK_SIZE, OVERLAP, Chunk, chunk_document, encoding
+from oasis.index.chunker import (
+    CHUNK_SIZE,
+    NAME_CHUNK_INDEX,
+    OVERLAP,
+    Chunk,
+    chunk_document,
+    encoding,
+    name_chunk,
+)
 
 # ---------------------------------------------------------------------------
 # Return type / shape
@@ -280,3 +288,40 @@ def test_overlap_equals_chunk_size_raises() -> None:
 def test_overlap_greater_than_chunk_size_raises() -> None:
     with pytest.raises(ValueError, match="overlap"):
         chunk_document("text", chunk_size=100, overlap=200)
+
+
+# ---------------------------------------------------------------------------
+# name_chunk — the filename as an embeddable chunk
+# ---------------------------------------------------------------------------
+
+
+def test_name_chunk_holds_the_humanized_filename() -> None:
+    chunk = name_chunk("/docs/paper-okapi-at-trec3.pdf")
+    assert chunk is not None
+    assert chunk.text == "paper okapi at trec 3"
+
+
+def test_name_chunk_index_cannot_collide_with_a_content_chunk() -> None:
+    # chunk_index is half of the vector store's primary key; a collision would
+    # have one chunk silently overwrite the other on upsert.
+    chunk = name_chunk("/docs/a.txt")
+    assert chunk is not None
+    assert chunk.chunk_index == NAME_CHUNK_INDEX
+    assert all(c.chunk_index >= 0 for c in chunk_document("some body text"))
+
+
+def test_name_chunk_counts_its_tokens() -> None:
+    chunk = name_chunk("/docs/annual-report.pdf")
+    assert chunk is not None
+    assert chunk.token_count == len(encoding().encode("annual report"))
+
+
+def test_name_chunk_is_none_when_the_name_has_no_words() -> None:
+    assert name_chunk("/docs/---.txt") is None
+
+
+def test_name_chunk_exists_for_a_file_with_no_extractable_text() -> None:
+    # The point: a scanned PDF produces zero content chunks and used to be
+    # unreachable by the semantic arm entirely.
+    assert chunk_document("") == []
+    assert name_chunk("/docs/scanned-tax-return.pdf") is not None

@@ -81,7 +81,7 @@ Do not, anywhere, claim NL parsing improves retrieval. The measured claim is the
 
 Running log of decisions, current state, and what's next. Updated with every change.
 
-Last resynced against the repo: **2026-07-29** (939 tests — 936 fast + 3 `slow` — all passing, `ruff check .` clean, verified by running them. Two passes that day: the README rewritten against the true state, then a subtraction pass that cut 151 lines and one unused dependency — see both Recently done 2026-07-29 entries).
+Last resynced against the repo: **2026-08-02** (988 tests — 985 fast + 3 `slow` — all passing, `ruff check .` clean, verified by running them. Latest change: filenames are now indexed and searched in both arms, +0.068 ndcg@10 — see Recently done 2026-08-02).
 
 ---
 
@@ -111,11 +111,11 @@ src/oasis/
 ├── cli/app.py
 ├── api/                 __init__, schemas, state, app, search, open, status, index, jobs, reset, serve  ← Phase 5.2
 ├── extractors/          base, registry, text, pdf, docx, pptx, xlsx, csv
-├── index/               db, keyword, vector, embeddings, chunker, walker, pipeline
+├── index/               db, keyword, vector, embeddings, chunker, filename, walker, pipeline
 ├── llm/                 __init__, base, manager, ollama
 └── query/               __init__, parser, retriever, reranker, snippets, search
 
-tests/                   38 test modules, 939 tests
+tests/                   39 test modules, 988 tests
 ├── fixtures/            sample.{txt,md,pdf,docx,pptx,xlsx,csv}
 eval/
 ├── corpus/              301 labeled files + MANIFEST.md
@@ -160,8 +160,12 @@ Notes on the tree (verified against disk, not memory — this section had drifte
 Known gap: `eval/corpus/txt/edge-latin1-menu.txt` can't be read by the UTF-8-only text extractor. No query targets it, so eval scores are unaffected.
 
 ### Index layer — `index/`
-- **`db.py`** — `open_db(path)`: creates dirs, `journal_mode=WAL`, `synchronous=NORMAL`, runs schema. `documents` carries `title`/`content` because FTS5 `content=documents` fetches them by rowid. Three triggers (`_ai`/`_ad`/`_au`) keep FTS in sync. Also a `meta(key, value)` table and `SCHEMA_VERSION = 2` (see Index capabilities below; 1 → 2 on 2026-07-16 when stored paths became guaranteed-absolute, so relative-path indexes read as < 2 and get flagged reindex-needed). `open_db` only *ensures* the meta table exists — it deliberately never infers markers from heuristics, because "absent" has to keep meaning "not known to be searchable" for every index built before the table existed.
+- **`db.py`** — `open_db(path)`: creates dirs, `journal_mode=WAL`, `synchronous=NORMAL`, migrates, runs schema. `documents` carries `filename`/`title`/`content` because FTS5 `content=documents` fetches them by rowid. Three triggers (`_ai`/`_ad`/`_au`) keep FTS in sync. Also a `meta(key, value)` table and `SCHEMA_VERSION = 3` (see Index capabilities below; 1 → 2 on 2026-07-16 when stored paths became guaranteed-absolute, so relative-path indexes read as < 2 and get flagged reindex-needed; 2 → 3 on 2026-08-02 for the `filename` column). `open_db` only *ensures* the meta table exists — it deliberately never infers markers from heuristics, because "absent" has to keep meaning "not known to be searchable" for every index built before the table existed.
+- **`FTS_COL_FILENAME/PATH/TITLE/CONTENT`** — the FTS column ordinals, named because `snippet()` and `bm25()` address columns by *number* and nothing in SQLite checks those numbers against the `CREATE`. A reordered schema would silently snippet the wrong column; `test_fts_column_order_matches_the_named_ordinals` is the guard.
+- **`_migrate(conn) -> bool`** (2026-08-02) — the 2 → 3 upgrade, run before `_SCHEMA`. **Not optional housekeeping:** `_SCHEMA` is all `CREATE … IF NOT EXISTS`, so against an existing index every statement including the triggers is a no-op — the old triggers would survive next to an FTS table with no `filename` column, and the first insert after upgrade would raise `no such column: new.filename` and take indexing down. Detection probes `PRAGMA table_info` rather than `meta.schema_version`, which is absent on legacy indexes and stale after a crashed write. FTS5 has no `ADD COLUMN`, so the table is dropped and recreated; because it is **external-content it stores no copy of the documents**, but it must then be told `INSERT INTO documents_fts(documents_fts) VALUES('rebuild')` — without that the migrated index answers every keyword query with zero results and no error at all. `filename` is backfilled from the stored path, so **the keyword arm gains filename search with no reindex**; the vector arm's name chunk still needs one, which is what the `SCHEMA_VERSION` bump (→ `reindex_recommended`) is actually for. A `duplicate column name` `OperationalError` is swallowed as "another *process* won the race" — `AppState._open_lock` only serializes threads within one process, and `oasis index` in a terminal can race the server the app spawned. **Verified on a copy of the real 301-doc / 363 MB `~/.oasis/index.db`**: 1.72 s, all 301 docs preserved, FTS live, second open a 0.00 s no-op.
+- **`filename.py`** (2026-08-02) — `humanize_filename(path)` / `filename_words(name)`, the one normalization all three consumers share (FTS column, embedded chunk, reranker passage) so they can't disagree about what a filename "says". Splits on non-alphanumerics, on camelCase, and on letter→digit — but **glues a digit run back onto a letter run of ≤ 2 chars**, because `q3`/`v2`/`mp3` are one word to a human while `trec3` is "trec" then "3". Directories are excluded deliberately: they're already in the `path` column, and folding them in would put every token of the user's home directory into the top-weighted column of every document they own. Only the last suffix is dropped (`report.tar.gz` keeps `tar`); the extension goes because it's a structured field twice over (`documents.extension`, the `file_types` filter) and would otherwise let `pdf` outrank documents genuinely about PDFs.
 - **`keyword.py`** — `KeywordIndex`; **all SQL in the project lives here**. `_file_hash(size, mtime)` → SHA-256[:16], used by both `upsert` and `is_unchanged` so skip logic and storage can't drift. `upsert` uses `INSERT … ON CONFLICT DO UPDATE` (fires the UPDATE trigger). `search(query, limit, *, after, before, folders, extensions)` — FTS5 `MATCH` + dynamic parameterized WHERE; `snippet(…, char(2), char(3), …)` keeps SQL free of string interpolation. The `folders` filter goes through **`folder_like_pattern()`** (separator boundary + escaped `%`/`_`, paired with `ESCAPE '\'`) — see the 2026-07-28 entry; a bare `LIKE 'prefix%'` matched siblings and treated a path's own `_` as a wildcard. Also `count`, `last_indexed_at`, `get_doc_id`, `delete`, `set_meta`/`get_meta`/`get_capabilities`, `docs_under(root)` — the sweep's scope query, whose authoritative filter is a Python separator-boundary `startswith`, never SQL `LIKE` (`_` is a LIKE single-char wildcard) — and `clear_documents()` / `clear_meta()`, the two halves of `POST /api/reset` (ordered separately around the vector drop for crash-safety). `Result`: `path`, `doc_id`, `title`, `snippet`, `rank`. `MATCH_START = "\x02"`, `MATCH_END = "\x03"`.
+- **`BM25_WEIGHTS = (8.0, 0.4, 2.0, 1.0)`** (filename, path, title, content), 2026-08-02 — `search` now orders by an explicit `bm25(documents_fts, …)` rather than the bare `rank` column, which is the same function at FTS5's flat 1.0 default. That default is what made a file *named* `paper-okapi-at-trec3.pdf` rank **below** a paper that merely cites Okapi in its body: one hit in a 40-word column and one in a 40,000-word column counted the same. **But the measurement says these numbers barely matter:** swept flat-1.0 → 32× filename, including `path` at 0.0, *every* setting scored an identical ndcg@10 0.6280 in hybrid, because RRF consumes only rank order and the cross-encoder re-scores the top 20 from scratch — weights are invisible unless they change which docs make the candidate pool. Kept for `--mode keyword`, which has no reranker downstream and does move (0.1776 → 0.1835). Treat the values as arbitrary within a wide band; don't tune them expecting hybrid to respond. The weights are formatted into the SQL because FTS5 requires bm25()'s weight arguments to be literals — module constants, never user input.
 
 #### Index capabilities — telling "legacy index" apart from "no results" (2026-07-15)
 
@@ -173,7 +177,7 @@ The problem: an index built before vectors existed returns nothing from semantic
 - `embedding_dimension` comes from the `EmbeddingModel` Protocol; the model *name* isn't on the Protocol, so it's read opportunistically via `getattr(embedder, "model_name", None)` — `SentenceTransformerEmbedder._model_name` became public `model_name` for this.
 - A corrupt marker (non-integer) reads as absent rather than crashing `/api/health`.
 - **`walker.py`** — `walk(root, *, extra_excludes, respect_gitignore, exclude_dotfiles, on_error)`. Layered cheapest-first: `_DIR_EXCLUDES` frozenset (prunes `dirnames` in place, never descends) → dotfile skip → pathspec `gitignore` spec. `followlinks=False`. Root-level `.gitignore` only. `on_error` is forwarded to `os.walk(onerror=…)` — **without it os.walk silently swallows directory-level errors**, so an unreadable tree yields nothing and looks identical to an empty one.
-- **`chunker.py`** — `chunk_document(text, *, chunk_size=500, overlap=50) -> list[Chunk]`. tiktoken `cl100k_base` (module-level `_ENC`), sliding window stepping `chunk_size - overlap`. Empty/whitespace → `[]`; raises `ValueError` on bad args.
+- **`chunker.py`** — `chunk_document(text, *, chunk_size=500, overlap=50) -> list[Chunk]`. tiktoken `cl100k_base` (module-level `_ENC`), sliding window stepping `chunk_size - overlap`. Empty/whitespace → `[]`; raises `ValueError` on bad args. Also **`name_chunk(path) -> Chunk | None`** (2026-08-02): the humanized filename as its own embeddable chunk at `NAME_CHUNK_INDEX = -1` — negative so it can never collide with a content chunk, since the chunk index is half the vector store's primary key and a collision would have one chunk silently overwrite the other on upsert. It is **its own chunk rather than a prefix on chunk 0** so it doesn't dilute a real passage's embedding, and so per-document dedup in retrieval picks it only when the name genuinely is the closest thing in the file to the query. It is also *unconditional on there being content*, which is what makes a scanned PDF or an empty sheet — zero chunks, previously invisible to the semantic arm entirely — findable by what the user called it.
 - **`embeddings.py`** — `EmbeddingModel` Protocol (`dimension`, `embed`). `SentenceTransformerEmbedder` wraps sentence-transformers with a module-level `_MODEL_CACHE` (load once per model name per process). Single `encode()` call, `show_progress_bar=False`. `DEFAULT_MODEL="all-MiniLM-L6-v2"` (384-dim).
 - **`vector.py`** — `VectorIndex` over LanceDB. `vector` column is `pa.list_(pa.float32(), dimension)` (fixed-size list, required for ANN). `upsert_chunks` → `merge_insert("chunk_id")`; `search(vec, limit, where)` cosine, maps `_distance` → `score`; `delete_by_doc_id`, `count`, `doc_ids_with_vectors()` (one bulk doc_id projection — the backfill's existence check, computed once per run, never per doc).
 - **`pipeline.py`** — `index_directory(conn, root, *, force, extra_excludes, on_file, vector_index, embedder, on_chunks_progress, cancel, on_reconcile) -> dict[str, int]`. **Absolutizes `root` once at entry** (`os.path.abspath` — lexical, no symlink following, no-op on absolute roots) so no relative path can ever reach the `documents` table; done in the pipeline, not the CLI, so every caller (CLI, API, eval) inherits it. Two phases: walk→extract→keyword (queues `_PendingDoc`), then embed→vector upsert in `EMBED_BATCH=64` batches, deleting stale chunks per doc first. `chunk_id = "{path}:{chunk_index}"` — stable across re-indexes. Stats keys always present, including `chunks`, `permission_denied`, and `removed`.
@@ -186,7 +190,7 @@ The problem: an index built before vectors existed returns nothing from semantic
 - **`retriever.py`** — `hybrid_search(conn, vector_index, embedder, parsed, *, top_n=10, candidate_limit=50) -> list[HybridResult]`. FTS5 (`build_fts_query`: semantic_query + quoted keywords) + vector (`build_vec_where`: extension/mtime/path filters) → dedupe vector to best chunk per doc → `_rrf` fusion (`RRF_K=60`) → assemble, preferring FTS5 snippet over raw chunk text. `build_kw_filters` extracts `after`/`before`/`folders`/`extensions` for `KeywordIndex.search`.
   - **The three `build_*` helpers are public**, and were renamed out of `_`-prefixed privacy on 2026-07-28: four modules outside `retriever.py` import them (`query/search.py`, `cli/app.py`, `eval/run_eval.py`, the tests), so the underscore was documentation that no longer described anything.
   **The two arms fail independently** (each in its own `try`). An FTS5 syntax error degrades the call to semantic-only; a vector/embedder failure degrades it to keyword-only; only if *both* fail does it raise, re-raising the keyword error as the one with an actionable message. Single-list RRF is well-defined and just preserves that list's order. This was worth +23% ndcg@10 — see Evaluation.
-- **`reranker.py`** — `CrossEncoderReranker` (`cross-encoder/ms-marco-MiniLM-L-6-v2`, shared `_MODEL_CACHE`). `rerank(query, results, *, top_n)` scores `(query, clean_snippet)` pairs, replaces `score` via `dataclasses.replace`, sorts desc. `_clean` strips `\x02`/`\x03` before scoring.
+- **`reranker.py`** — `CrossEncoderReranker` (`cross-encoder/ms-marco-MiniLM-L-6-v2`, shared `_MODEL_CACHE`). `rerank(query, results, *, top_n)` scores `(query, _passage(r))` pairs, replaces `score` via `dataclasses.replace`, sorts desc. `_clean` strips `\x02`/`\x03` before scoring. **`_passage()` prepends the humanized filename to the snippet** (2026-08-02): without it this stage actively *undoes* the retrieval it is reranking, because a document found because its filename matched arrives carrying a content snippet that by construction contains none of the query terms — the two arms surface the file and the reranker buries it. It is also in-distribution for this model class: MS MARCO cross-encoders are trained on passages that lead with a title. Worth +0.011 ndcg@10 / +0.029 mrr on its own.
 - **`snippets.py`** — `fts_snippet` (FTS5 `snippet()` on column 2, `None` on missing doc or `OperationalError`), `text_snippet` (pure-Python fallback, centers on first match, `…` when truncated), `get_snippet` (FTS first, fallback second). `_extract_terms` strips boolean operators; `_highlight_terms` wraps matches in the sentinels. `SNIPPET_TOKENS = 40`.
 
 ### LLM — `llm/`
@@ -285,6 +289,35 @@ Body `{path}`; opens an indexed file via `subprocess.run(["open", …])` (list f
 > Also: **12/83 parses fail outright** (`InstructorRetryException`) and fall back to raw silently — ~15% of queries in this run, 19/83 in an earlier one. Non-deterministic.
 >
 > **Do not put "NL parsing improves retrieval" on a résumé.** The measured claim is the opposite. The defensible story is: *"built an eval harness, discovered the headline feature was a net −0.11 ndcg@10 regression, and diagnosed why."* That is a better story than the one that was planned.
+
+> ### 🟢 Filename indexing: **+0.068 ndcg@10**, and it is entirely the vector chunk (2026-08-02)
+>
+> Re-measured end to end on the shipped stack, one variable at a time, all rows from one process against one index:
+>
+> | configuration | ndcg@10 | recall@10 | mrr | p@5 |
+> |---|---|---|---|---|
+> | before (flat BM25, no name chunk, name-blind CE) | 0.5601 | 0.6844 | 0.5427 | 0.2275 |
+> | + BM25 column weights | 0.5601 | 0.6844 | 0.5427 | 0.2275 |
+> | + filename vector chunk | 0.6169 | 0.7567 | 0.6039 | 0.2325 |
+> | **+ name-aware reranker (shipping)** | **0.6280** | 0.7442 | **0.6331** | 0.2300 |
+>
+> Per arm, isolating the name chunk by suppressing name chunks at query time (equivalent to rebuilding without them, since a chunk never returned can't influence fusion):
+>
+> | arm | without name chunk | with | Δ |
+> |---|---|---|---|
+> | semantic | 0.4939 | **0.6994** | **+0.206** |
+> | hybrid (RRF, no CE) | 0.4933 | 0.6531 | +0.160 |
+> | hybrid + CE | 0.5601 | 0.6280 | +0.068 |
+>
+> The 0.4939 semantic-without-name-chunk figure reproduces the historical 0.4937 baseline to within noise, which is what makes the rest of the column trustworthy.
+>
+> **The distribution, not just the mean: 25 queries improved, 19 regressed, 36 unchanged.** The gains are big and the losses small. Per tag: `filename-only` 0.3155 → **1.0000** (n=2), `csv` 0.3385 → **0.6942** (n=8 — descriptive names, unreadable bodies, exactly the case this is for), `keyword` 0.7925 → 0.9341, `combined` 0.2598 → 0.3119; against `conversational` 0.7928 → **0.6699** (n=5). The regressions have one shape: **boosting names necessarily boosts near-duplicates that share one.** `"contracts from 2023"` (−0.442) has seven `contract-*.docx` files that now all match hard on the name, crowding out the two whose *mtime* the labels judge by — and raw mode has no date filter to break the tie. The corpus's deliberate mtime-vs-filename-date trap (`MANIFEST`/`queries.yaml` both flag it) makes this class of query the worst case by construction. `"how to aim a stargazing scope…"` (−0.521) and `"the walkthrough of making a branch…"` (−0.500) are the other shape: a name chunk displacing a content chunk that was a better answer.
+>
+> **Three findings, in descending order of how much they should change behavior:**
+>
+> 1. **The vector chunk is the whole effect; the BM25 weights are theatre.** Swept flat-1.0 → 32× filename, including dropping `path` to 0.0 — **every setting produced an identical 0.6280** in hybrid. RRF consumes only the keyword arm's rank *order* and the CE re-scores the top 20 from scratch, so intra-pool reordering is invisible unless it changes pool membership. The weights survive only because `--mode keyword` has no reranker downstream and does move there (0.1776 → 0.1835). **Don't tune them expecting hybrid to respond.**
+> 2. **The corpus flatters this.** Eval filenames were authored self-describing (`manual-espresso-machine-em500.pdf`). Real folders are full of `Document (1).pdf` and `IMG_4032.HEIC`. **+0.206 is an upper bound, not an expectation.**
+> 3. **🔴 The cross-encoder has flipped to net-negative, and it was not before.** It used to be the only step converting RRF's recall into ranking (+0.072 ndcg over raw fusion) — that sentence was true when written and is now false. With the name chunk present, raw fusion scores **0.6531** and reranking pulls it **down to 0.6280**, and plain semantic beats both at **0.6994**. Deliberately not acted on in this change: the task was filenames, and one corpus with unusually descriptive filenames is thin evidence for deleting a component that also does the snippet-level work no other stage does. See Up Next.
 >
 > ### Earlier warning (now resolved — kept for the audit trail)
 >
@@ -330,9 +363,11 @@ The jump is entirely from splitting `hybrid_search`'s try blocks (below). 10 of 
 
 ---
 
-## Tests — 939, all passing
+## Tests — 988, all passing
 
-Run with `pixi run -e dev pytest` (fast: 936 + 3 `slow` deselected) or `pixi run -e dev pytest -m ''` (all 939). Slow tests load real models on CPU. (952 until 2026-07-29, when the subtraction pass deleted the 13 tests covering the dead `fts_snippet`/`get_snippet` path along with the functions themselves.)
+Run with `pixi run -e dev pytest` (fast: 985 + 3 `slow` deselected) or `pixi run -e dev pytest -m ''` (all 988). Slow tests load real models on CPU. (952 until 2026-07-29, when the subtraction pass deleted the 13 tests covering the dead `fts_snippet`/`get_snippet` path along with the functions themselves; 939 until 2026-08-02, when filename indexing added 49.)
+
+New 2026-08-02 (filenames): `test_filename.py` (24, new module) — the humanizer over real-world names, the `_GLUE_MAX_LETTERS` rule table (`q3`/`mp3` stay whole, `trec3`/`covid19`/`2023taxes` split, a typed separator in `q-3` is respected), directories excluded, last-suffix-only stripping, and the degenerate names (`Makefile`, `.zshrc`, `---.txt`, `""`). `test_db.py` +9 — the v2→v3 migration against a **hand-built verbatim v2 schema** (backfill, documents preserved, **the FTS rebuild without which every keyword query silently returns nothing**, backfilled names immediately searchable, migrated triggers accepting new writes, idempotency, and the marker deliberately *not* advanced) plus the FTS-ordinal guard. `test_keyword.py` +9 — filename-only words found, camelCase and digit-suffix words found, and the **two ranking regressions**: a named file outranking a passing body mention, and directory names staying weak enough that `/home/misc/work.txt` beats `/home/work/notes.txt` for "work". `test_chunker.py` +5 and `test_reranker.py` +4 — the name chunk's collision-proof negative index and its existence for a text-less file; the reranker passage leading with the name, and its two degenerate shapes (no snippet, no name).
 
 > **`FORCE_COLOR` / `COLUMNS` in the environment produce 8 false failures.** Every CLI test that asserts on output text (`'1 result' in result.output`, `'3 indexed'`, `'No result #5'`, …) breaks if Rich decides to emit ANSI into Click's `CliRunner` capture. `FORCE_COLOR` makes it colour a non-TTY, and `COLUMNS=0` makes it pick a degenerate width and wrap mid-assertion — the output then reads `'\x1b[?25l\x1b[32m⠋\x1b[0m \x1b[2mParsing query…'` and the substring is genuinely absent. Nothing is wrong with the code. Some terminals and agent harnesses export both, so a suite that is green in one shell is 8-red in another; measured 2026-07-28, where it briefly looked like a regression on `master`. Reproduce a clean run with `env -u FORCE_COLOR -u COLUMNS pixi run -e dev pytest`. (The durable fix, if this recurs, is to pin the terminal in the test fixture rather than to trust the ambient environment.)
 
@@ -360,16 +395,19 @@ Also new 2026-07-15: `test_api_search.py` (18) — real SQLite+LanceDB over a 3-
 
 | File | N | File | N | File | N |
 |---|---|---|---|---|---|
-| `test_parse_query.py` | 91 | `test_walker.py` | 29 | `test_registry.py` | 17 |
-| `test_vector.py` | 58 | `test_keyword.py` | 29 | `test_llm_providers.py` | 17 |
-| `test_retriever.py` | 58 | `test_embeddings.py` | 25 | `test_keyword_edges.py` | 17 |
-| `test_cli.py` | 54 | `test_cli_edges.py` | 22 | `test_human_size.py` | 16 |
-| `test_snippets.py` | 35 | `test_extractor_edges.py` | 21 | `test_db.py` | 16 |
-| `test_parser.py` | 37 | `test_ollama_manager.py` | 20 | `test_pdf_extractor.py` | 15 |
-| `test_reranker.py` | 36 | `test_integration.py` | 20 | `test_docx_extractor.py` | 15 |
-| `test_chunker.py` | 35 | `test_extractors.py` | 20 | `test_config.py` | 11 |
-| `test_pipeline.py` | 52 | `test_walker_edges.py` | 19 | `test_models.py` | 10 |
-| | | `test_pptx_extractor.py` | 18 | | |
+| `test_parse_query.py` | 91 | `test_filename.py` | 24 | `test_capabilities.py` | 16 |
+| `test_retriever.py` | 67 | `test_cli_edges.py` | 23 | `test_human_size.py` | 16 |
+| `test_vector.py` | 58 | `test_extractor_edges.py` | 21 | `test_api_skeleton.py` | 15 |
+| `test_cli.py` | 54 | `test_extractors.py` | 20 | `test_docx_extractor.py` | 15 |
+| `test_pipeline.py` | 53 | `test_integration.py` | 20 | `test_pdf_extractor.py` | 15 |
+| `test_keyword.py` | 42 | `test_ollama_manager.py` | 20 | `test_config.py` | 11 |
+| `test_chunker.py` | 40 | `test_api_index.py` | 19 | `test_device.py` | 11 |
+| `test_reranker.py` | 39 | `test_walker_edges.py` | 19 | `test_api_open.py` | 10 |
+| `test_parser.py` | 37 | `test_api_search.py` | 18 | `test_models.py` | 10 |
+| `test_snippets.py` | 35 | `test_pptx_extractor.py` | 18 | `test_api_status.py` | 9 |
+| `test_walker.py` | 29 | `test_keyword_edges.py` | 17 | `test_api_reset.py` | 8 |
+| `test_embeddings.py` | 25 | `test_llm_providers.py` | 17 | `test_api_remove_root.py` | 5 |
+| `test_db.py` | 24 | `test_registry.py` | 17 |  |  |
 
 ---
 
@@ -495,6 +533,7 @@ Landed ahead of the API so `api/` can be written against a stable pipeline:
   1. **Soft filters.** `build_vec_where` / `build_kw_filters` turn LLM guesses into hard `WHERE` exclusions, so one wrong guess zeroes a query's recall. Convert to a post-hoc score boost so a wrong guess costs a little and a right one still helps. This is an asymmetric-payoff problem, not a prompt problem — no amount of prompt-tuning fixes it.
   2. **Embed the original query, not `semantic_query`.** Distillation produced `'civic duty'` for the JFK inaugural and `'ocean pollution'` for coral bleaching. Keep `semantic_query` for the FTS5 arm (where it genuinely helps: keyword +0.040) and give the embedder the user's actual words.
   - Re-run the matrix after each change; the harness now supports it directly.
+- **🔴 Settle whether the cross-encoder still earns its place.** New as of 2026-08-02 and the most consequential open question in retrieval. Indexing filenames inverted the result the reranker was justified by: it used to buy +0.072 ndcg over raw fusion, and now it *costs* 0.025 (fusion 0.6531 → reranked 0.6280), while plain semantic beats both at 0.6994. Deliberately not acted on inside the filename change — but it can't sit. What settling it needs, in order: (1) check whether the effect is corpus-specific, because this corpus's filenames are unusually descriptive and a name chunk that is short and on-topic is exactly what an MS MARCO cross-encoder over-rewards; (2) try reranking against a *longer* passage than a 20-token FTS snippet, since the CE may be starved rather than wrong; (3) only then consider demoting it to opt-in. Note what would be lost: the CE is the only stage that reads snippet-level evidence, and semantic-only search has no keyword arm to rescue an exact rare term. **Do not delete it on one corpus's numbers** — that is the same mistake the NL-parsing finding was careful not to make.
 - **Consider a bigger parse model.** 12–19 of 83 parses fail outright with `llama3.2:3b`, non-deterministically, and the successful ones hallucinate filters. Worth measuring `llama3.1:8b` before concluding the feature is unsalvageable.
 - **Fix `ensure_ollama()`'s health check** (`llm/manager.py`). It verifies "server answers HTTP" + "model appears in `ollama list`" and calls that available — but a provider that passes both can still 500 on every inference (exactly what a broken `llama-server` does). The CLI then silently falls back to raw on every search and **the user is never told the feature is dead**; the eval reported `llm_used: true` for 83/83 failures. The check should do one tiny real completion, cache the result, and treat a failure as unavailable. This is the difference between "Ollama isn't installed" (fine, expected) and "Ollama is lying to you" (currently indistinguishable).
 - **Regenerate the comparison table once the parser runs.** The current keyword row is invalid as a baseline (see the warning under Evaluation).
@@ -857,6 +896,33 @@ Same outcome whether launched by `open` or by Finder, and **whether or not the I
 #### Left on the machine
 
 `~/Applications/Oasis.app` (the self-contained build). The index was restored to exactly its pre-test state — 300 documents, one root (`~/Downloads/corpus`) — by removing the three probe roots through `POST /api/index/remove-root`; probe apps, probe folders, and their TCC rows were deleted.
+
+### Recently done (2026-08-02) — filenames are searched, in both arms
+
+**+0.068 ndcg@10 on the shipping configuration** (0.5601 → 0.6280), +0.060 recall@10, +0.090 mrr. The full measurement, its ablation, and the three findings that came out of it are under Evaluation § 🟢 Filename indexing — including the one that matters most, that **the vector chunk is the entire effect and the BM25 weights are worth nothing end-to-end**.
+
+**The gap.** A filename was reachable only as part of the raw absolute path, in one FTS column at FTS5's flat 1.0 weight, and the semantic arm never saw one at all. Three concrete symptoms, all reproduced against the eval index before any code was written:
+
+| query | before |
+|---|---|
+| `anscombe quartet` | **nothing** — "quartet" isn't in the file and FTS5 ANDs terms |
+| `okapi` | `paper-graph_of_word_and_tw_idf.pdf` **above** `paper-okapi-at-trec3.pdf` |
+| `seaborn` | `MANIFEST.md` above every `seaborn-*.csv` |
+
+`unicode61` splits on punctuation but not on case or letter/digit boundaries, so `Q3ReportFinal.pdf` and `trec3` were single opaque tokens no reasonable query matched.
+
+**What changed.**
+- **`index/filename.py`** — one normalization shared by all three consumers so they can't drift. The `_GLUE_MAX_LETTERS = 2` rule is the only judgment call: `q3`/`v2`/`mp3` are one word, `trec3` is two.
+- **Schema v3** — `filename` as its own `documents` + FTS column, weighted `bm25()` instead of the bare `rank`, and `FTS_COL_*` ordinals named because `snippet()`/`bm25()` address columns by number and nothing checks those numbers against the `CREATE`.
+- **`_migrate`** — the piece with the most failure modes and the least glamour; see the `db.py` entry. Without it an upgraded index would raise `no such column: new.filename` on the first write. Backfilling means **the keyword arm needs no reindex**; only the vector arm does, which is what the version bump signals.
+- **`chunker.name_chunk`** — the filename as its own embedded chunk. This is where the entire measured gain lives.
+- **`reranker._passage`** — the CE was undoing the retrieval it reranked: a filename-only match arrives with a snippet that by construction contains none of the query terms.
+
+**Verified live, not just in tests.** Migration run against a **copy of the real 301-doc / 363 MB `~/.oasis/index.db`**: 1.72 s, all documents preserved, FTS rebuilt and searchable, `okapi` now returning the right file first, second open a 0.00 s no-op. Then a fresh CLI index of a scratch corpus: `anscombe quartet` (previously zero results) returns the right file first; `mortgage application` finds a **completely empty file** whose name is the only signal it has — a case that previously produced zero chunks and was unreachable by the semantic arm entirely; `quarterly report final` matches `Q3ReportFinal.txt`.
+
+**Tests: 939 → 988** (+49), covering the tokenizer's real-world names and glue rule, the v2→v3 migration against a hand-built verbatim v2 schema (including the rebuild, without which every keyword query silently returns nothing), the two ranking regressions above, the name chunk's collision-proof index, and the reranker passage. `ruff check .` clean.
+
+**One deliberate non-change:** the finding that the cross-encoder is now net-negative. It is recorded under Evaluation and Up Next, not acted on — see the reasoning there.
 
 ### Recently done (2026-07-29) — subtraction pass: cut what nothing needs
 
