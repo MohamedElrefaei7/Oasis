@@ -212,7 +212,7 @@ Every other endpoint returns `503` while `status != "ready"`, rather than blocki
 | `q` | `str` | required | raw query text |
 | `mode` | `"keyword" \| "semantic" \| "hybrid"` | `"hybrid"` | the `SearchMode` enum in `query/search.py` — literally the same one the CLI uses, since both front-ends call `run_search` |
 | `limit` | `int` | `10` | mirrors `DEFAULT_TOP_N` |
-| `raw` | `bool` | `false` | skip NL parsing, same as `--raw` |
+| `raw` | `bool` | **`true`** | skip NL parsing. **Defaults to *on*, unlike the CLI's `--raw` flag** — the eval measured parsing as a −0.108 ndcg@10 / −0.135 recall@10 regression, so parsing-off is the best-measured path and the LLM never runs unless a caller explicitly asks for it (`api/search.py`). This is also what keeps the app from ever probing or starting Ollama. |
 
 **Bad FTS5 syntax `400`s in `keyword` mode only.** `hybrid` degrades to semantic-only and returns `200` with results; `semantic` never parses the query as an expression, so it can't hit this at all.
 

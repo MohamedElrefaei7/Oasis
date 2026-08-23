@@ -245,3 +245,10 @@ eval/results/run.log
 # The recipe (spike/build.sh, spike/serve_entry.py) is what's worth keeping;
 # its output is not, same rule as dist/.
 spike/pybuild/
+
+# Packaging output. `packaging/` holds the scripts (sign.sh, make_dmg.sh,
+# entitlements.plist) — those are the recipe and they stay tracked. The staged
+# bundle and the disk image are 1.1 GB and 480 MB of regenerable artifact, same
+# rule as dist/ and spike/pybuild/.
+packaging/stage/
+packaging/*.dmg

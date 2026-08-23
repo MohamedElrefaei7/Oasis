@@ -81,7 +81,7 @@ Do not, anywhere, claim NL parsing improves retrieval. The measured claim is the
 
 Running log of decisions, current state, and what's next. Updated with every change.
 
-Last resynced against the repo: **2026-08-02** (1001 tests — 998 fast + 3 `slow` — all passing, `ruff check .` clean, verified by running them. Two passes that day: filenames indexed and searched in both arms, then the loose threads tied off — together ndcg@10 0.5601 → 0.6981. See both Recently done 2026-08-02 entries).
+Last resynced against the repo: **2026-08-22** (packaging closed out — libtorch dedup, deliberate ad-hoc signing, the DMG — and the README restructured around the app, with three generated charts; see both 2026-08-22 entries. Engine unchanged since **2026-08-02** (1001 tests — 998 fast + 3 `slow` — all passing, `ruff check .` clean, verified by running them. Two passes that day: filenames indexed and searched in both arms, then the loose threads tied off — together ndcg@10 0.5601 → 0.6981. See both Recently done 2026-08-02 entries.)
 
 ---
 
@@ -89,7 +89,9 @@ Last resynced against the repo: **2026-08-02** (1001 tests — 998 fast + 3 `slo
 
 **One branch: `master`, and the history is linear — zero merge commits, by construction.** Every arc so far (the pixi migration, the whole Swift app, the freeze spikes, the packaging steps) landed as ordinary commits on `master`; the one topic branch that ever existed, `app-wrapper-self-contained-bundle`, was fast-forwarded in and deleted on 2026-07-28 so the packaging work reads as one sequence rather than a side track. Local `master` and `Oasis/master` (GitHub) are kept identical.
 
-Regenerable artifacts are gitignored and must stay that way: `dist/` (the frozen server the build phase embeds), `spike/pybuild/` (PyInstaller's `--workpath`, rebuilt on every `--clean` freeze), `app/.build-release/` (xcodebuild derived data). What *is* tracked is the recipe — `spike/build.sh` and `spike/serve_entry.py` — never its output.
+Regenerable artifacts are gitignored and must stay that way: `dist/` (the frozen server the build phase embeds), `spike/pybuild/` (PyInstaller's `--workpath`, rebuilt on every `--clean` freeze), `app/.build-release/` (xcodebuild derived data), and `packaging/stage/` + `packaging/*.dmg` (the staged signed bundle and the disk image, 1.1 GB and 480 MB). What *is* tracked is the recipe — `spike/build.sh`, `spike/dedupe_torch.sh`, `spike/serve_entry.py`, and `packaging/{sign.sh,make_dmg.sh,entitlements.plist}` — never its output.
+
+**`docs/img/` is the deliberate exception to that rule.** The three README charts are generated output (`eval/plot_readme.py`) and they are **committed anyway**, because GitHub renders a README from the repo and cannot run a script to produce its images. Both halves are tracked — the generator and its PNGs — and the generator reads `eval/results/` at run time so regenerating them can never quietly disagree with the numbers in the prose. `eval/results/ablations/matrix-current/` is tracked for the same reason: it is the evidence under a published table.
 
 ## Current State
 
@@ -99,7 +101,9 @@ Phases 1–5.1 complete: extraction, keyword index, vector index, hybrid retriev
 
 **The app is feature-complete for Phase 6 and the codebase has had a full refactor pass (2026-07-28)** — one search engine shared by the CLI and the server (the CLI's duplicate copy had drifted onto the eval-rejected rerank input), one `OasisAPI` client shared by the six Swift view models, one implementation of the capability derivation that `/api/health` and `/api/status` both promise not to disagree on, and two real over-matching bugs fixed in the folder filter. See "Recently done (2026-07-28)".
 
-**Packaging has started, and the app now works on a machine that has never seen it (2026-07-28).** A Release build embeds the frozen server, both models and the tiktoken encoding in `Contents/Resources/`, and spawns the server pointed at them offline. Verified the only way it can be: HF/tiktoken/torch caches moved aside, **Wi-Fi off**, Finder double-click — **11.63 s to ready**, models proven open from inside the bundle by `lsof`, then an index and a search. 1.3 GB total. What that step could **not** settle is the Full Disk Access question: this Mac does not gate `~/Documents` for *any* app (proven with three fresh-identity control bundles), so the clean walk is uninformative and the spawned-server TCC fork stays open. See "The `.app` wrapper" entry; the rest of the arc — weights + offline, the `libtorch_cpu` dedup, deliberate signing, the DMG — is under Up Next › Packaging.
+**Packaging has started, and the app now works on a machine that has never seen it (2026-07-28).** A Release build embeds the frozen server, both models and the tiktoken encoding in `Contents/Resources/`, and spawns the server pointed at them offline. Verified the only way it can be: HF/tiktoken/torch caches moved aside, **Wi-Fi off**, Finder double-click — **11.63 s to ready**, models proven open from inside the bundle by `lsof`, then an index and a search. 1.3 GB total. What that step could **not** settle is the Full Disk Access question: this Mac does not gate `~/Documents` for *any* app (proven with three fresh-identity control bundles), so the clean walk is uninformative and the spawned-server TCC fork stays open. See "The `.app` wrapper" entry.
+
+**Packaging is now closed out (2026-08-22).** The duplicated `libtorch_cpu.dylib` is a relative symlink (1.3 GB → **1.1 GB**), the bundle is **ad-hoc signed inside-out** with `get-task-allow` deliberately dropped and no hardened runtime, and it ships as a **480 MB** DMG. `codesign --verify --deep --strict` passes; `spctl --assess` rejects, which is the expected verdict for an un-notarized app and the reason the README now carries a Gatekeeper walkthrough. The *signed* app was re-verified end to end — launch, ready, index 300 docs, search — with **zero files written into the bundle**. Two things remain and neither can be settled from this machine: one real download-and-open pass (a locally built DMG has no quarantine attribute, so nothing here tests Gatekeeper) and the Full Disk Access question. See the "Packaging — dedup, ad-hoc signing, DMG" entry.
 
 ### Package structure
 
@@ -132,6 +136,11 @@ app/Oasis/Oasis/         25 Swift files — the macOS app (Phase 6)
 ├── <feature>Models      wire mirrors of api/schemas.py, field names read off the source
 └── views                ContentView, ResultCard, StatisticsPanelView, IndexProgressView,
                          SettingsView, SummonPanel/View, ThumbnailLoader, LaunchAtLogin
+
+spike/                   the freeze recipe — build.sh, serve_entry.py, serve_entry.spec,
+                         dedupe_torch.sh (collapses the doubled libtorch_cpu.dylib)
+packaging/               the distribution recipe — sign.sh (inside-out ad-hoc signing),
+                         entitlements.plist, make_dmg.sh.  Output (stage/, *.dmg) is gitignored
 ```
 
 Notes on the tree (verified against disk, not memory — this section had drifted badly before the 2026-07-14 resync):
@@ -550,10 +559,10 @@ Landed ahead of the API so `api/` can be written against a stable pipeline:
   - ~~**Design for the NEXT index commit — stale reconciliation + no-vector backfill**~~ **Both landed 2026-07-17** — see Recently done. The sweep gates inside the pipeline on cancel + census cleanliness (equivalent to the planned `status == "done"` gate, decided at the only place holding the seen-set); backfill embeds unchanged-but-unvectored docs. Deferred refinements recorded there: partial-chunk-set detection (a crash mid-embed reads as vectored; `--force` is the escape hatch) and per-subtree permission-denied exclusion (the coarse whole-sweep skip is the deliberate first cut).
 - **Swift app, step 9 and beyond. Every control in the app is now live.** Steps 1 (lifecycle seam), 2 (main window + search), 3 (**Index New Folder**), 4 (**Reindex Current Folders**), 5 (the **statistics panel**), 6 (**Reset Indexing**), 7 (the **⌘⌥O summon panel + menu-bar residency**) and 8 (**Settings**) are done — see Recently done (2026-07-25), the four (2026-07-26) entries and the (2026-07-27) ones. ~~Opening a result via `POST /api/open`~~ and ~~keyboard result navigation~~ **both landed 2026-07-27**. The deferred follow-on is a **context menu** (Reveal in Finder / Copy path). ~~Two threads left open by step 4: a **manage-indexed-folders** affordance~~ **landed with step 8** — Settings ▸ Folders, on `POST /api/index/remove-root`; the deleted-root wedge now has a recourse. Still open from step 4: **`force: true`** as an explicit "full rebuild" for an embedder-dimension change. Also still open from step 3: the **Full Disk Access first-run flow** — step 8 added a *deep link* and an explainer under Settings ▸ General, which is guidance, not onboarding: there is still no first-run prompt and no re-try-after-granting, and the spawned-server TCC question belongs to the distribution arc. Then the `reindex_recommended` prompt. ~~One open thread from step 1: the bundled-binary spawn path for release (`RELEASE TODO` in `ServerController.resolveServerBinary()`)~~ **closed 2026-07-28** — a Release `.app` embeds and spawns its own frozen server (see the `.app` wrapper entry); the FDA question it was meant to answer is still open, because this machine doesn't gate `~/Documents`. The sandbox is **not** an open thread — `ENABLE_APP_SANDBOX = NO` is permanent and correct for a directly-distributed app (see Recently done, 2026-07-25). The genuine permission work is **Full Disk Access**, which TCC requires of unsandboxed apps too and which the `permission_denied` counter already anticipates — a Tier-1 first-run flow, not a sandbox question.
 - ~~**Migrate the CLI's search command to `query/search.py:run_search()`**~~ **Done 2026-07-28.** The CLI's rerank input moved from `semantic_query` to the raw query in the process, matching the API — verified by running the same query through both and getting identical rankings.
-- **📦 Packaging and bundling — the next arc, and the ground is now clear.** Deliberately **not** started; recorded here so the state is known when it is.
+- ~~**📦 Packaging and bundling — the next arc.**~~ **Complete as of 2026-08-22**, apart from two items that need a machine other than this one (below). Kept in full because the sequence — what unblocked it, what each step cost, and which risk turned out to be overstated — is the record.
   - **Unblocked, and what proved it.** The real `oasis serve` freezes (2026-07-27 spike): PyInstaller `--onedir`, the recipe and its one non-obvious flag (`--collect-submodules tiktoken_ext`) recorded in that entry, launching in 1.6 s to handshake / 8.3 s to ready and serving all three modes plus indexing. **1.1 G** is the measured bundle floor for the server, weights excluded.
   - **What the 2026-07-28 pass did for it, concretely.** The tiktoken encoding is lazy, so the frozen binary no longer risks dying before its handshake on a plugin scan, and no entry point does network work at import. `OasisAPI.swift` means the app has **one** place that knows how to reach the server, which is what the dev-path → bundled-binary switch has to edit. The `build` pixi environment (`default` + pyinstaller, eval tooling verifiably absent from the bundle) is in the manifest.
-  - ~~**Still owed, in rough order:** the bundled-binary spawn path~~ **The `.app` wrapper landed 2026-07-28 — see the entry below.** The Release build is self-contained: the frozen server is embedded in `Contents/Resources/`, spawned from there, and a Finder-launched `.app` indexes and searches with no pixi environment anywhere. ~~Still owed after it: weights inside the bundle + `HF_HUB_OFFLINE`~~ **also landed 2026-07-28** — both models and the tiktoken encoding are embedded and the bundled spawn runs offline against them, verified on a simulated cold machine (caches moved aside, Wi-Fi off): **11.63 s to ready**, 1.3 GB total. Still owed: ad-hoc signing done deliberately (the wrapper build gets Xcode's "Sign to Run Locally" for free, which is *not* the same as a considered signing story) and hardened-runtime-meets-dylibs; trimming the duplicated `libtorch_cpu.dylib` (237 M × 2 — the single largest recoverable win, deferred to the signing step because symlinking a dylib interacts with `codesign`); the DMG; and the spawned-server Full Disk Access / TCC question, which the wrapper experiment **could not settle on this machine** — see the verdict below.
+  - ~~**Still owed, in rough order:** the bundled-binary spawn path~~ **The whole packaging arc has now landed.** The `.app` wrapper (2026-07-28) made the Release build self-contained; weights + `HF_HUB_OFFLINE` (2026-07-28) made it work on a cold, disconnected machine; and **dedup + deliberate ad-hoc signing + the DMG landed 2026-08-22** — 1.3 GB → **1.1 GB**, signed inside-out, a **480 MB** DMG, and the signed app re-verified spawning/indexing/searching with zero writes into the bundle. See the "Packaging — dedup, ad-hoc signing, DMG" entry. Two items survive the arc and neither is settleable here: **one real download-and-open pass** (a locally built DMG carries no quarantine attribute, so Gatekeeper is untested and the README install section is explicitly marked draft) and the **spawned-server Full Disk Access / TCC question**, which needs a Mac that actually gates `~/Documents` — see the verdict below.
   - **One unrelated item still open from the spike:** re-run the search-during-index regression on **lancedb 0.34.0**, or pin to 0.30.2. The concurrency result that makes `VectorIndex` a shared handle was measured on 0.30.2.
 - **The real `~/.oasis` index has no embeddings** (built June 3, pre-vector). Re-index to populate `index.lance`. **Detection is now handled** — `/api/health` reports `documents: 877, schema_version: 0, semantic_ready: false, reindex_recommended: true` against it (verified live 2026-07-16), so the app gets a single server-derived boolean to act on instead of doing version math; what's left is the app-side UX for that prompt. **Repair no longer needs `--force` (2026-07-17): the no-vector backfill makes a plain `oasis index` embed unchanged-but-unvectored docs**, so the plain reindex the app will offer actually flips `semantic_ready` true (verified live against a copy of the real index).
 - **🔴 Make the NL filters soft, and stop distilling the embedding query.** The measured headline finding (top of Evaluation): parsing costs −0.108 ndcg@10 / −0.135 recall@10 on hybrid+CE. Two fixes, both small:
@@ -924,6 +933,190 @@ Same outcome whether launched by `open` or by Finder, and **whether or not the I
 
 `~/Applications/Oasis.app` (the self-contained build). The index was restored to exactly its pre-test state — 300 documents, one root (`~/Downloads/corpus`) — by removing the three probe roots through `POST /api/index/remove-root`; probe apps, probe folders, and their TCC rows were deleted.
 
+### Recently done (2026-08-22) — the README is documentation for the app, not a tour of the engine
+
+**The README was written for someone reading the repo; it is now written for someone who wants the app.** Install moved to the top, the CLI came out, the HTTP API section came out, the results section grew three generated charts, and the roadmap became a reflection instead of a task list. Docs only — plus one new script, `eval/plot_readme.py`, and the eval runs that back it.
+
+#### Structure
+
+Centered top matter (`<div align="center">`, which GitHub renders) carrying the title, tagline, the two-paragraph pitch, the on-device line, and an HTML-comment placeholder for a main-window screenshot — **there is no screenshot in the repo**, so the placeholder names the path and the markup to paste in. Then: **Install** → **Using Oasis** → **Looking Under The Surface: The Architecture of Oasis** → **Measured results** → Project state → Stack → Design decisions → **Moving Forward**.
+
+Removed outright: *Quick startup guide (CLI)*, *Commands*, *The local HTTP API*, *Features*. Their surviving content is either in the app walkthrough (as a thing a user can touch) or in the architecture section (as a mechanism), never as usage docs for a tool the audience doesn't have.
+
+**Exactly one CLI reference survives**, in the architecture section, as evidence for the "one engine, many front-ends" claim rather than as documentation. A second one in Moving Forward was rewritten out and replaced with the stronger version of the same claim: `eval/verify_served.py` re-runs the whole eval through the HTTP path and asserts the served rankings are identical to calling retrieval directly (`served_verification.json`: `rankings_identical: true`, 0 mismatches over 80 queries).
+
+#### Charts — generated, never typed
+
+`eval/plot_readme.py` writes three PNGs into `docs/img/`, reading every figure out of `eval/results/` at run time. **Nothing is hardcoded**, including the 25/19/36 per-query split, which is recomputed from the two runs' `per_query` blocks rather than quoted. Missing input → the script names the file and exits rather than drawing something plausible.
+
+| chart | source | shows |
+|---|---|---|
+| `retrieval-modes.png` | `ablations/matrix-current/{keyword,semantic,hybrid,hybrid-ce}.json` | the four-mode matrix across ndcg@10 / mrr / recall@10 |
+| `parsing-reversal.png` | the eight paired `ablations/*{,-llm}.json` (2026-07-14) | raw vs parsed ndcg@10 per mode, with the deltas called out |
+| `filename-signal.png` | `ablations/{baseline-filename,filename-v1}.json` | the averages **and** the per-query win/loss split beside them |
+
+Every y-axis starts at zero. A truncated axis is the standard way to make a small difference look decisive, and these charts exist to be believed.
+
+**The third chart was worth doing because it carries the caveat inside the figure.** The instruction was to skip it if the data wasn't cleanly comparable — it is (both runs are hybrid+CE, parse off, same day, same corpus), and putting the 25/19/36 split next to the +0.068 average is what stops the average from being read as a uniform win.
+
+#### 🟡 The published matrix had no result files behind it
+
+The README quoted a four-row matrix (keyword 0.1835 / semantic 0.6994 / hybrid 0.6531 / hybrid+CE 0.6981, "measured together 2026-08-02") and **only the last row existed on disk** — the other three had been run with `--no-history` to an `--out` path that wasn't kept. Numbers in a README with nothing reproducible behind them are exactly what the eval discipline is supposed to prevent, and it happened here.
+
+Re-run today into `eval/results/ablations/matrix-current/` (committed), and **all four reproduced to the digit**:
+
+| mode | ndcg@10 | mrr | recall@10 | p@5 |
+|---|---|---|---|---|
+| keyword | 0.1835 | 0.2025 | 0.1792 | 0.0625 |
+| semantic | 0.6994 | 0.7177 | 0.7817 | 0.2700 |
+| hybrid | 0.6531 | 0.6317 | 0.7963 | 0.2650 |
+| hybrid + CE | 0.6981 | 0.7066 | 0.7713 | 0.2625 |
+
+Exact reproduction three weeks and one code state later is a real result in its own right: the eval is deterministic with parsing off, and the published table was honest. The fix is that the *files* now exist, so the chart reads them instead of a human retyping them.
+
+#### 🔴 The matrix does not say what the README said it said
+
+Writing the chart caption forced a reading of the four rows side by side, and the old README's summary — *"hybrid+CE is back on top of the matrix"* — **is not true**. On the current corpus:
+
+| | ndcg@10 | mrr | recall@10 | p@5 |
+|---|---|---|---|---|
+| semantic alone | **0.6994** | **0.7177** | **0.7817** | **0.2700** |
+| hybrid + CE (shipping) | 0.6981 | 0.7066 | 0.7713 | 0.2625 |
+
+**Semantic-only matches or beats the shipping configuration on every metric.** The ndcg gap (0.0013) is noise; the mrr gap (0.0111) probably is not. The reranker still clearly earns its place *against raw fusion* (0.6531 → 0.6981, +0.045), so the mechanism argument holds — but the claim that the full architecture beats the simplest thing that works does not, on this corpus.
+
+The README now says so directly, in the section that shows the chart, with the honest counter-argument attached rather than omitted: hybrid's case is **robustness** — the arm that still answers on a filename, an exact phrase, or a term the embedding model never saw — and 80 well-formed natural-language questions is close to the best case for pure vector search. That is an argument a **second corpus** settles, and it is now the first item under *Moving Forward*, upgraded from a general "one corpus isn't enough" to a specific, falsifiable one.
+
+Recorded loudly because it is the kind of finding that quietly doesn't get written down: it makes the project's headline architecture look less impressive, and nothing in the tests or the tooling would ever have surfaced it. It came out of putting four numbers next to each other and reading them.
+
+#### 🔴 Stale claims found while verifying the README against the code
+
+1. **`CLAUDE.md` had `GET /api/search`'s `raw` defaulting to `false`. The code defaults it to `true`** (`api/search.py:75`), deliberately and with the eval cited in the docstring. **Fixed in `CLAUDE.md`** — the spec was wrong, not the implementation. It matters beyond a default: `raw=true` returns before `state.get_llm()`, so nothing on the app's path can probe or start Ollama.
+2. **"The only socket Oasis opens is loopback: its own API, *and a probe to `localhost:11434`*"** — not true of the app. `SearchViewModel` hardcodes `raw=true`, so the Ollama probe is unreachable from any app action. The README now claims the stronger, accurate thing: one socket, its own.
+3. **"Three search modes — pick with `--mode`"** was listed as a feature. The app hardcodes `mode=hybrid` and does not expose a picker; there is nothing to pick. Now stated as: the app always runs the best-measured configuration.
+4. **"One engine, three front-ends"** counted the HTTP service as a front-end. It is the seam the app talks *through*, not a third UI. Reworded.
+5. The old Features/Commands sections described `--force`, `--verbose`, `oasis open N` and the three modes — all real, none reachable from the app, all removed under the app-audience rule.
+
+#### Numbers: unchanged, better placed
+
+Every measured figure is carried across untouched — the matrix, the parsing reversal (−0.108 ndcg@10 / −0.135 recall@10, 19 of 80 queries to zero, both mechanisms), the filename result (+0.068, +0.206 on the semantic arm, 25/19/36, the `contract-*.docx` failure shape, the upper-bound caveat), the reranker-passage step (0.6280 → 0.6981, and that a *longer* fragment was worth nothing), and the deliberately blank latency line. Two things were added rather than softened: the `filename-only` tag's **n=2** is now stated (it was quoted as "every filename-only query" with the sample hidden), and the 0.6280 → 0.6981 gap between the filename ablation and the shipping row is now explained instead of left for the reader to notice.
+
+#### One incidental fix
+
+`pyproject.toml` gained `testpaths = ["tests"]` in the packaging pass; it is what keeps `pytest` from walking `packaging/stage/`. Verified again here: 998 fast + 3 slow green, `ruff check .` clean, and the signed bundle's seal still valid after the runs.
+
+### ✅ Packaging — dedup, ad-hoc signing, DMG (2026-08-22)
+
+**The bundle is now a distributable artifact: 1.3 GB → 1.1 GB, ad-hoc signed inside-out, and wrapped in a 480 MB DMG.** `codesign --verify --deep --strict` passes, `spctl --assess` rejects (the expected verdict, and the whole reason the README's install section exists), and the *signed* app still spawns its own server, reaches ready, indexes 300 documents and searches — writing **zero files into the bundle**. What is not settled, and cannot be from here, is the download-side experience: a locally built DMG carries no quarantine attribute, so nothing done on this machine tests Gatekeeper.
+
+Order was fixed and non-negotiable — **dedup → sign → verify → package** — because a signature seals structure, so any structural change after signing invalidates it.
+
+#### The dedup: which copy is real, established rather than assumed
+
+PyInstaller ships `libtorch_cpu.dylib` twice at 237 MB — `_internal/` and `_internal/torch/lib/`. **They are not byte-identical** (same size, different SHA-256), which rules out a hash comparison as the way to tell them apart: the only difference is `LC_RPATH`, and the question that actually matters is which one dyld maps.
+
+- `torch/_C…so` has one rpath, `@loader_path/..` → `_internal/`, and needs `@rpath/libtorch_python.dylib`.
+- `_internal/libtorch_python.dylib` is **already a symlink PyInstaller made** → `torch/lib/libtorch_python.dylib`, whose one rpath is `@loader_path/../..` → back to `_internal/`.
+- So the chain lands on the `_internal/` copy, and `torch/lib/libtorch_cpu.dylib` is never opened.
+
+**Confirmed with `lsof` against a live frozen server, not read off the load commands** — only `_internal/libtorch_cpu.dylib` appears in the process's open files, before and after the change and again from inside the signed bundle. `spike/dedupe_torch.sh` replaces the dead copy with a relative symlink (`../../libtorch_cpu.dylib`), and it is **wired into `spike/build.sh`**: a re-freeze recreates both copies, so a dedup that lived only in a human's memory would silently regrow the bundle on the next build.
+
+**Symlinking was the deferred risk and it was overstated.** `_internal/` already contains ~70 symlinks including cross-directory ones of exactly this shape (`libtorch_python.dylib -> torch/lib/…`, `libarrow.2500.dylib -> pyarrow/…`), and the Jul-28 bundle shipped signed with all of them. `codesign` seals a symlink by **recording its target string** in `CodeResources` (`<key>symlink</key><string>../../libtorch_cpu.dylib</string>`) rather than hashing 237 MB — so the link's destination is covered by the seal and the bytes are not duplicated. Verified before signing, after signing, and after the DMG round trip.
+
+| | |
+|---|---|
+| `dist/serve_entry/` | 1.1 G → **897 M** |
+| `Oasis.app` | 1.3 G → **1.1 G** (1,104,880 KB apparent, 9,208 entries) |
+
+#### Signing: what "deliberately" changed versus what Xcode gave us for free
+
+The Jul-28 build was signed by Xcode's **"Sign to Run Locally"**, which is `codesign --force --sign -` on the **outer bundle only**. That is not nothing — but it seals nested content by hash without ever having signed it deliberately, and it injects entitlements chosen for a debugger.
+
+`packaging/sign.sh` replaces it:
+
+- **Inside-out, explicitly.** 447 nested Mach-O files signed deepest-first, then the one nested resource bundle, then the `.app` last. `--deep` would be one flag and is the wrong tool — deprecated, and its nested-bundle/symlink behaviour on a tree this size is exactly what you do not want to be guessing at.
+- **Symlinks are excluded from the walk.** `codesign` follows a link to its target, so signing both signs the same bytes twice, and a link signed before its target seals a stale hash. Regular files only; the deduped dylib is precisely this case.
+- **`com.apple.security.get-task-allow` is dropped.** Xcode injects it into local builds so the debugger can attach; on a shipped artifact it lets any process attach to Oasis and read its memory — wrong for a tool whose pitch is that nothing leaves the machine. `packaging/entitlements.plist` keeps only `files.user-selected.read-only` (a no-op while unsandboxed, kept because it is what the target declares) and says in a comment why the other is absent.
+- **No hardened runtime.** It exists to satisfy notarization, which is not happening (free distribution, no paid Developer account), and it would restrict exactly what a frozen Python/torch runtime does. Adding it would be cargo cult with a real chance of breaking launch.
+
+```
+codesign --verify --deep --strict --verbose=2  →  valid on disk
+                                                  satisfies its Designated Requirement   (exit 0)
+spctl --assess --type execute --verbose=4      →  rejected                               (exit 3)
+
+codesign -dvv                                  →  Identifier=Administrator.Oasis
+                                                  Format=app bundle with Mach-O thin (arm64)
+                                                  CodeDirectory v=20400 flags=0x2(adhoc)
+                                                  Signature=adhoc   TeamIdentifier=not set
+                                                  Sealed Resources version=2 rules=13 files=7901
+codesign -d --entitlements -                   →  {"com.apple.security.files.user-selected.read-only": true}
+                                                  (get-task-allow gone, as intended)
+```
+
+**The `spctl` rejection is the deliverable, not a failure.** It is what every downloader will hit, and it is what the README's Gatekeeper walkthrough exists to answer.
+
+#### The signed app, re-verified end to end
+
+Signing can break what worked unsigned, so everything was re-run against the signed bundle:
+
+| check | result |
+|---|---|
+| launched via **LaunchServices** (`open`), not Xcode | spawned `…/stage/Oasis.app/Contents/Resources/serve_entry/serve_entry serve --managed`, parent = `Contents/MacOS/Oasis` |
+| launch → `/api/health` `ready` | **10.95 s** from local disk; **14.82 s** launched off the read-only mounted DMG |
+| health payload | `documents: 300, semantic_ready: true, schema_version: 3, reindex_recommended: false` — the real index, decoded |
+| `libtorch_cpu` mapped | the deduped `_internal/` copy, from inside the signed bundle |
+| index through the signed binary | `indexed=300 chunks=16024 failed=2 permission_denied=0 removed=0`, terminal `done` |
+| search | 5 results, 1.20 s, top hits identical to the pre-dedup unsigned run |
+| **writes into the bundle** | **zero** — `path\|size\|mtime\|mode` over all 9,208 entries diffed **identical** before/after a launch, a full index and a search |
+| `~/.oasis/hf` (the writable half) | still exists, still **empty** — nothing needed writing |
+| signature after all of that | still `valid on disk` |
+| teardown | no orphaned `serve_entry` on quit |
+
+**Weights provenance was re-proven with a control that can fail.** An earlier attempt passed for the wrong reason and is worth recording: with `HOME` pointed at an empty directory but the network up, the *no-cache-vars* control reached `ready` anyway — it had **downloaded both models** into the fake HOME. That is the same false-pass family as the tiktoken bug. Forcing `HF_HUB_OFFLINE=1` in both arms fixes it:
+
+| case (fresh empty `HOME`, offline forced) | result |
+|---|---|
+| no `HF_HUB_CACHE` | **error** — "couldn't connect … couldn't find them in the cached files" |
+| `HF_HUB_CACHE` → `Oasis.app/…/models/hub` | **ready**, 0 model dirs downloaded |
+
+#### The DMG
+
+`packaging/make_dmg.sh` — `hdiutil create -format UDZO -imagekey zlib-level=9`, over a staging root holding `Oasis.app` plus an `/Applications` symlink (which is all the drag-install layout needs; `create-dmg` is not installed and only adds Finder window styling). UDZO rather than ULFO/ULMO on purpose: the newer codecs save a few percent in exchange for a mount failure on an older macOS, a bad trade for a first release. The script refuses to package a bundle that fails `codesign --verify`, which is the one check that catches "built the DMG before signing".
+
+| | |
+|---|---|
+| **compressed DMG** | **480 MB** (503,220,631 bytes) — the real download figure |
+| installed | 1.1 GB |
+| ratio | ~2.3× |
+
+Mounts clean (CRC32 verified), the app inside it passes `codesign --verify --deep --strict`, the dedup symlink survived the image, and the app **launches and reaches ready from the read-only volume**. It carries **no `com.apple.quarantine`**, confirmed with `xattr` — which is exactly why this does *not* test Gatekeeper.
+
+#### README install section — drafted, marked unverified
+
+New `## Install (macOS app)` section: download size, drag-install, the Sequoia-era Gatekeeper path (**System Settings → Privacy & Security → Security → Open Anyway → authenticate**, since the right-click→Open bypass was removed), first-run expectations (~12 s cold to ready, everything on-device), and Full Disk Access. The whole section carries a **draft-pending-real-download** banner, and the FDA subsection carries its own **unverified** banner for the reason that has not changed: this Mac gates nothing at that tier. The status table, the packaging paragraph and the roadmap were resynced with it, and a signing/notarization line was added to Design decisions.
+
+#### 🔴 `pytest` broke the signature, and that is the sharpest lesson here
+
+Running a plain `pytest` from the repo root after signing left the staged bundle **`a sealed resource is missing or invalid`**. Not a collection nuisance — a *broken seal*. Two things happened at once:
+
+1. pytest walked `packaging/stage/` and tried to collect the frozen torch's `testing/_internal/**/*_test.py` (14 collection errors), and
+2. in doing so it **imported those modules, and CPython wrote 1,172 `.pyc` files into 205 new `__pycache__` directories inside a signed `.app`.**
+
+That is the failure mode the `HF_HOME` split was designed against — *a write inside a signed bundle breaks its seal* — arriving from a direction nobody was watching: not the app, but the **repo's own test suite**, because the signed artifact was staged inside the repo.
+
+**Fix, and it is the right setting regardless:** `pyproject.toml` now sets **`testpaths = ["tests"]`**. `dist/` never had this problem only because `dist` and `build` happen to be in pytest's default `norecursedirs`; `packaging` is not, and relying on that list was luck.
+
+**Repair, and what it confirms.** Every one of the 1,377 additions was under `__pycache__` — verified by diffing the live tree against a `path|size|mtime|mode` snapshot taken before any of it, not by pattern-guessing. Deleting exactly those restored the tree to byte-identical (the only residue is parent-directory mtimes, which `codesign` does not seal) and `--verify --deep --strict` passes again. **The DMG is untouched** — it was built before the incident, re-verified after it, and contains zero stray `.pyc`. Full suite green afterwards: 998 fast + 3 slow, `ruff check .` clean.
+
+Worth stating plainly because it generalizes: **a signed bundle sitting inside a source tree is a live hazard**, and any tool that walks the tree and imports Python — pytest, a linter with an import mode, a coverage run — can silently invalidate it. Keeping `packaging/stage/` gitignored is not enough; the tools have to be told too.
+
+#### What is left
+
+- **One real download-and-open pass.** Only the other side of a download can test quarantine + Gatekeeper. Everything in the install section is a prediction until then.
+- **Full Disk Access, still.** Unchanged and still needing a second Mac — the control probe (fresh bundle id + `opendir`) is the 30-second way to check whether a machine is a valid test bed.
+- **Hosting.** The DMG exists at `packaging/Oasis.dmg` (gitignored, like `dist/`); nothing publishes it yet.
+- Unchanged from the freeze spike: re-run the search-during-index regression on **lancedb 0.34.0**, or pin 0.30.2.
+
 ### Recently done (2026-08-02) — filenames are searched, in both arms
 
 **+0.068 ndcg@10 on the shipping configuration** (0.5601 → 0.6280), +0.060 recall@10, +0.090 mrr. The full measurement, its ablation, and the three findings that came out of it are under Evaluation § 🟢 Filename indexing — including the one that matters most, that **the vector chunk is the entire effect and the BM25 weights are worth nothing end-to-end**.
@@ -1026,6 +1219,8 @@ Worth recording so it isn't re-checked: **no junk is tracked in git** (no `.DS_S
 ~~One thing on disk, not in git, and **not deleted here because it is 1.5 GB and irreversible**: `.venv.pre-pixi-SAFE-TO-DELETE/`~~ **Deleted 2026-08-02**, along with the stray `app/Oasis/.mypy_cache/`. Checked first: a plain uv-made venv (nothing bespoke in it), git-ignored and untracked, referenced by no code or config, and not the live interpreter — `pixi run` resolves to `.pixi/envs/dev`, which still imports `oasis` and `torch` fine afterwards.
 
 ### Recently done (2026-07-29) — README resynced to the true state
+
+> **Superseded by the 2026-08-22 restructure**, which rewrote the README for the app's audience — install to the top, the CLI/Commands/HTTP-API sections out, charts in. The *principle* below is what carried forward and is why that rewrite kept every measured number untouched; the structure it describes is no longer the file's shape.
 
 The `README.md` had drifted to its 2026-07-26 shape and was describing a project two arcs behind: it listed the HTTP API and the native app under **"Possible Future Roadmap"** (both are built), claimed "~940 tests" (952), and — the part that actually mattered — **sold NL parsing as a headline feature with no mention that the eval measured it at −0.108 ndcg@10 and that it is off by default.** That last one is a direct violation of the "Honesty over marketing — in the README" principle at the top of this file, and it was the reason to rewrite rather than patch.
 

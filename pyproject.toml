@@ -58,6 +58,12 @@ eval = [
 # hermeticity property true: a plain `pytest` run never imports torch. Run them
 # with `pytest -m slow` (or `pytest -m ''` for everything).
 addopts = "-m 'not slow'"
+# The project's tests all live in tests/. Say so, because a bare `pytest` from
+# the repo root would otherwise walk packaging/stage/ — a signed .app carrying a
+# frozen torch, whose testing/_internal tree is full of `*_test.py` files that
+# error on collection. dist/ and build/ escape this only because they happen to
+# be in pytest's default norecursedirs; packaging/ is not.
+testpaths = ["tests"]
 markers = [
     "slow: loads real models (PyTorch); deselect with -m 'not slow'",
 ]

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- NSOpenPanel's "Index New Folder" picker. A no-op while the app is
+	     unsandboxed (ENABLE_APP_SANDBOX = NO, permanent for direct
+	     distribution), kept because it is what the target declares. -->
+	<key>com.apple.security.files.user-selected.read-only</key>
+	<true/>
+	<!-- Deliberately ABSENT: com.apple.security.get-task-allow. Xcode injects
+	     it into local builds so the debugger can attach; on a shipped artifact
+	     it lets any process attach to Oasis and read its memory — which, for a
+	     tool whose whole pitch is that your files and queries never leave the
+	     machine, is the wrong default. Dropping it costs nothing but the
+	     ability to debug the shipped bundle. -->
+</dict>
+</plist>
