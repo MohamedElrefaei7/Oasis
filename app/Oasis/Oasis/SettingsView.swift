@@ -358,7 +358,7 @@ private struct AboutSettingsTab: View {
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
 
-            Link("github.com/oasis", destination: URL(string: "https://github.com/mohamedelrefaei/oasis")!)
+            Link("github.com/MohamedElrefaei7/Oasis", destination: URL(string: "https://github.com/MohamedElrefaei7/Oasis")!)
                 .font(.callout)
         }
         .padding(28)

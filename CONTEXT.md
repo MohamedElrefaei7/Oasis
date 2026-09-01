@@ -933,6 +933,55 @@ Same outcome whether launched by `open` or by Finder, and **whether or not the I
 
 `~/Applications/Oasis.app` (the self-contained build). The index was restored to exactly its pre-test state — 300 documents, one root (`~/Downloads/corpus`) — by removing the three probe roots through `POST /api/index/remove-root`; probe apps, probe folders, and their TCC rows were deleted.
 
+### Recently done (2026-08-31) — the freeze went five weeks stale, and nothing said so
+
+**Repackaging for download surfaced a shipped-broken app.** The rebuild was meant to pick up two app-side changes (the icon, the About link) over an unchanged frozen server. The frozen server was unchanged — since **2026-07-28**. The Aug-22 date on `dist/serve_entry/` is when the libtorch dedup symlink was made, not the freeze. Three commits to `src/oasis/query/` landed after it (`9c1bd2f`, `bf12c28` filenames-in-both-arms, `51331b8`), and the index had moved to schema v3 underneath it.
+
+Result: the app launched, `/api/health` reported `status: "ready"`, and **every search returned HTTP 500**.
+
+```
+oasis/query/search.py:114 run_search -> reranker.py:70 rerank -> reranker.py:44 _clean
+AttributeError: 'NoneType' object has no attribute 'replace'
+```
+
+`_passage` does `_clean(result.rerank_text or result.snippet)`; current `retriever.py:213` defaults that to `""`, the Jul-28 code did not. Confirmed it was the freeze and not the engine: identical query, identical DB, current source via `pixi run oasis serve` returned **200 with results**, the bundled binary returned **500** — on `revenue growth`, `budget`, `machine learning`, `the`, `eisenhower`, all of them.
+
+**This is the project's recurring failure family, now at the packaging layer.** Two artifacts that are supposed to be the same thing, nothing enforcing it, drift accumulating silently until something exercises the difference — the same shape as the CLI's drifted copy of the search engine, the spec claiming `raw=false` while the code said `true`, and the published eval matrix with no result files behind it. Each of those was caught by noticing. This is the first fix that prevents rather than detects.
+
+#### The two guards
+
+**1. A source stamp, checked at embed time (`spike/source_stamp.sh`, wired into `spike/build.sh` and `app/Oasis/Scripts/embed_server.sh`).** The freeze records a hash of the source it was built from; the embed phase recomputes it and **fails the build** on mismatch.
+
+- **It hashes content, not a commit.** A bare `git rev-parse HEAD` is a false green on a dirty tree, and re-freezing mid-work with uncommitted changes is the normal case — a hash matching HEAD while the working tree differs is precisely the state being guarded against. So the compared value is a sha256 over every file under `src/oasis/` (path included, so a rename moves it); HEAD and a `clean`/`dirty` flag ride along as fields 2 and 3 for the error message only, never compared.
+- `__pycache__`/`.pyc`/`.DS_Store` excluded — a stray `.pyc` from a test run must not invalidate a good freeze. `LC_ALL=C` on the sort, or the same tree hashes differently under different `LANG` and the guard fails builds for no reason, which is how a guard gets deleted instead of fixed.
+- **Error, not warning.** A warning scrolls past in xcodebuild output, which is the same as not having it. Verified both directions: matching stamp exits 0, tampered stamp exits 1 with both values printed.
+- The stamp ships inside the bundle (`Contents/Resources/serve_entry/oasis-source-stamp`), so a shipped `.app`'s provenance is readable after the fact.
+
+**2. A functional gate in `packaging/make_dmg.sh`.** The stamp catches *stale*; it cannot catch *broken*. The deeper lesson is that the smoke test was checking liveness rather than function: `ready` means the models loaded and says nothing about whether retrieval works. So the DMG script now boots the bundled server, waits for ready, and **runs a real query, requiring results** — refusing to package on anything less, exactly as it already refuses to package an unsigned bundle. Structure checks plus a functional check.
+
+- An **empty index fails the check** rather than passing it: a machine with nothing indexed cannot demonstrate retrieval works, and silently packaging there would be a green that proved nothing. `OASIS_SKIP_SMOKE=1` is the documented escape hatch (mirroring `OASIS_EMBED_SERVER`), and it says loudly that search went unverified.
+- `wait` after the kill, so job control doesn't print `Terminated: 15` into the output of a script whose entire job is refusing to package broken things.
+
+#### The repackage itself
+
+Re-froze (`bash spike/build.sh`, ~3 min), dedup fired automatically from inside the recipe (`saved 237 MB`), rebuilt, re-signed, re-packaged. **Bundle 1.1 GB** — the dedup tell; a jump toward 1.3 GB would have meant the fresh freeze regrew the duplicate. Signature `valid on disk / satisfies its Designated Requirement`; `spctl` `rejected` as expected; `get-task-allow` absent. Zero writes into the bundle across a full launch, seal still valid after running, child exits with parent. Search verified for real this time — ranked, sensible results (`budget` → the three household spreadsheets; `machine learning` → the ML readmes; `eisenhower` → the 1953 SOTU first), 775-1025 ms warm.
+
+**DMG: 480 MB (503,384,610 bytes)**, checksum valid, mounts, app inside signed and deduped. README's exact byte count updated; the rounded 480 MB / 1.1 GB figures still hold. `~/Applications/Oasis.app` replaced — the stale unsigned Jul-28 1.3 GB copy is gone, and the installed copy was smoke-tested (ready, 3 results, 866 ms).
+
+#### Incidental
+
+The **tiktoken cache had evaporated** and failed the Embed Models phase: it lives in `$TMPDIR/data-gym-cache`, which macOS clears. Repopulated and copied to `~/.cache/data-gym-cache`, a stable location the script already checks, so it will not recur on this machine.
+
+### Recently done (2026-08-31) — the app has an icon
+
+`AppIcon.appiconset` had never been filled: `Contents.json` listed the Xcode template's empty slots (ten `mac` sizes plus three `ios` 1024 ones, on a `SUPPORTED_PLATFORMS = macosx` target), so every build shipped the generic blank-document icon. It now carries the Oasis artwork — palm tree over a pool on sand — as a single `mac` 512x512@2x entry; `actool` derives the smaller sizes itself, so one file is the whole icon set.
+
+**The source art was 2000x2000, and that size fails silently.** `actool` treats a dimension mismatch as an *Ambiguous Content* warning, not an error, and then drops the image: the compile emitted an empty partial plist — no `CFBundleIconName`, no `Assets.car`, no `.icns` — and the build would have succeeded with no icon at all. Resized to exactly 1024x1024 (plain resample, artwork unchanged), the same compile emits `AppIcon.icns` + `Assets.car` and sets `CFBundleIconName`/`CFBundleIconFile`, with zero warnings. If the icon ever looks blank again, compile the catalog by hand and read the partial plist — a warning is the only thing it will tell you.
+
+### Recently done (2026-08-31) — About tab points at the real repo
+
+`SettingsView.swift:361` linked to `https://github.com/mohamedelrefaei/oasis`, a placeholder URL that 404s. Both the label and the destination now name the actual repository: `https://github.com/MohamedElrefaei7/Oasis`. One-line change, no behavior beyond the link target.
+
 ### Recently done (2026-08-22) — the README is documentation for the app, not a tour of the engine
 
 **The README was written for someone reading the repo; it is now written for someone who wants the app.** Install moved to the top, the CLI came out, the HTTP API section came out, the results section grew three generated charts, and the roadmap became a reflection instead of a task list. Docs only — plus one new script, `eval/plot_readme.py`, and the eval runs that back it.

@@ -42,6 +42,45 @@ if [ ! -x "${SERVER_DIST}/serve_entry" ]; then
     exit 1
 fi
 
+# --- the freeze must match the source being built -------------------------
+#
+# `dist/serve_entry/` and `src/oasis/` are two artifacts that are supposed to
+# be the same program, and until 2026-08-31 nothing enforced it. The frozen
+# server went five weeks stale, the app embedded it without complaint, it
+# launched and reported `status: "ready"`, and every single search returned
+# HTTP 500 — the index had moved to schema v3 and the frozen reranker predated
+# it. `ready` is a liveness signal, so nothing upstream of an actual query
+# noticed.
+#
+# This compares a content hash of `src/oasis/` against the one recorded at
+# freeze time (see spike/source_stamp.sh for why it is content and not a
+# commit hash). It is an ERROR, not a warning: a warning scrolls past in
+# xcodebuild output, which is the same as not having it.
+STAMP_FILE="${SERVER_DIST}/oasis-source-stamp"
+if [ ! -f "${STAMP_FILE}" ]; then
+    echo "error: ${SERVER_DIST} has no oasis-source-stamp — it predates the staleness check"
+    echo "error: re-freeze so the freeze records its source, from the repo root:"
+    echo "error:   bash spike/build.sh"
+    exit 1
+fi
+
+frozen_stamp="$(cut -d' ' -f1 < "${STAMP_FILE}")"
+current_stamp="$(bash "${REPO_ROOT}/spike/source_stamp.sh" "${REPO_ROOT}")"
+current_hash="${current_stamp%% *}"
+
+if [ "${frozen_stamp}" != "${current_hash}" ]; then
+    echo "error: the frozen server is not built from this source tree."
+    echo "error:   frozen from: $(cat "${STAMP_FILE}")"
+    echo "error:   current src: ${current_stamp}"
+    echo "error: embedding it would ship a server that can drift arbitrarily far from"
+    echo "error: the code under src/oasis — which is how a five-week-stale freeze once"
+    echo "error: shipped an app that reached 'ready' and 500'd on every search."
+    echo "error: re-freeze, from the repo root:"
+    echo "error:   bash spike/build.sh"
+    exit 1
+fi
+echo "note: frozen server matches src/oasis (${frozen_stamp:0:12}, ${current_stamp#* })"
+
 mkdir -p "${DEST_DIR}"
 
 # --delete so a re-freeze that drops a file doesn't leave it behind; rsync's

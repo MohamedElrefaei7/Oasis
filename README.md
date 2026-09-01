@@ -36,7 +36,7 @@ the app doesn't even keep a request log, so your queries aren't written down any
 > Full Disk Access prompt all need one real download-and-open pass before this
 > section can drop the warning.
 
-**Download:** `Oasis.dmg` — **480 MB** (503,220,631 bytes). About **1.1 GB** once
+**Download:** `Oasis.dmg` — **480 MB** (503,384,610 bytes). About **1.1 GB** once
 installed. Most of that is the machine-learning stack: PyTorch, the embedding
 model, and the cross-encoder reranker, all bundled so that Oasis never needs the
 network.
