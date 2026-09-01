@@ -27,15 +27,6 @@ the app doesn't even keep a request log, so your queries aren't written down any
 
 ## Install (macOS app)
 
-> **⚠️ Draft, pending real-download verification.** Every step below was written
-> against a locally built `Oasis.dmg` and a locally signed bundle. A DMG built on
-> this machine carries **no `com.apple.quarantine` attribute**, which is the exact
-> attribute Gatekeeper keys on — so mounting it here proves the image and the app
-> are sound, and proves *nothing at all* about the first-launch experience of
-> someone who downloaded it. The Gatekeeper wording, the number of clicks, and the
-> Full Disk Access prompt all need one real download-and-open pass before this
-> section can drop the warning.
-
 **Download:** `Oasis.dmg` — **480 MB** (503,384,610 bytes). About **1.1 GB** once
 installed. Most of that is the machine-learning stack: PyTorch, the embedding
 model, and the cross-encoder reranker, all bundled so that Oasis never needs the
@@ -395,9 +386,9 @@ prevent.
 | macOS app (SwiftUI) | **Feature-complete** — search, indexing, statistics, reset, ⌘⌥O summon, menu-bar residency, Settings |
 | Packaging | **Built, not yet published** — self-contained `.app` (1.1 GB), ad-hoc signed inside-out, **480 MB** DMG, deliberately not notarized |
 
-The DMG is built and verified locally but **not hosted anywhere yet**, which is why the
-install steps above carry a draft banner. Until then, running Oasis means building it
-from this repo — see [`app/README-dev.md`](app/README-dev.md).
+The DMG is built and verified locally but **not hosted anywhere yet**. Until then,
+running Oasis means building it from this repo — see
+[`app/README-dev.md`](app/README-dev.md).
 
 ---
 

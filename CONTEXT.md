@@ -1144,6 +1144,20 @@ Mounts clean (CRC32 verified), the app inside it passes `codesign --verify --dee
 
 New `## Install (macOS app)` section: download size, drag-install, the Sequoia-era Gatekeeper path (**System Settings → Privacy & Security → Security → Open Anyway → authenticate**, since the right-click→Open bypass was removed), first-run expectations (~12 s cold to ready, everything on-device), and Full Disk Access. The whole section carries a **draft-pending-real-download** banner, and the FDA subsection carries its own **unverified** banner for the reason that has not changed: this Mac gates nothing at that tier. The status table, the packaging paragraph and the roadmap were resynced with it, and a signing/notarization line was added to Design decisions.
 
+#### Install section: draft banner dropped (2026-08-31)
+
+The `## Install (macOS app)` section's **draft-pending-real-download** banner is **removed**, at the maintainer's direction, on the basis of a real download-and-open pass they ran themselves. The supporting evidence on this machine is a genuinely quarantined artifact — `~/Downloads/Oasis.dmg`, `com.apple.quarantine: 0081;6a9633d4;Chrome;…`, `kMDItemWhereFroms` pointing at `github.com/MohamedElrefaei7/Oasis/releases` — which is exactly the condition a locally built DMG could never reproduce.
+
+**What changed:** the banner blockquote, and a now-dangling clause in the roadmap paragraph ("…which is why the install steps above carry a draft banner").
+
+**What deliberately did not change, and should be read as an open thread rather than a closed one:**
+
+- **The install prose is unrevised.** The Gatekeeper dialog wording, the number of clicks and the **System Settings → Privacy & Security → Security → Open Anyway** path are the same sentences drafted before any download existed. They were written from documented macOS behaviour, and nobody has since diffed them against a real dialog. Dropping the banner removed the *label* on that gap, not the gap.
+- **No screenshots.** `docs/img/` still holds only the three chart PNGs; the main-window `<!-- SCREENSHOT: … -->` placeholder is still unfilled. Install instructions are matched on pictures of dialogs more than on prose, and there are none.
+- **The FDA subsection keeps its `Unverified` banner.** A download pass tests quarantine and Gatekeeper; it says nothing about whether this Mac gates `~/Documents`, which it still does not.
+
+**Also now stale and left alone pending a decision:** the roadmap still says the DMG is **"not hosted anywhere yet"** and the status table says **"Built, not yet published"**, but the `kMDItemWhereFroms` above indicates a GitHub release exists. Not rewritten here because publishing state is the maintainer's call, not an inference from one xattr.
+
 #### 🔴 `pytest` broke the signature, and that is the sharpest lesson here
 
 Running a plain `pytest` from the repo root after signing left the staged bundle **`a sealed resource is missing or invalid`**. Not a collection nuisance — a *broken seal*. Two things happened at once:
@@ -1161,7 +1175,8 @@ Worth stating plainly because it generalizes: **a signed bundle sitting inside a
 
 #### What is left
 
-- **One real download-and-open pass.** Only the other side of a download can test quarantine + Gatekeeper. Everything in the install section is a prediction until then.
+- ~~**One real download-and-open pass.**~~ **Done by the maintainer, off-session (2026-08-31)** — see "Install section: draft banner dropped" below. Two caveats travel with it, and they are the reason this line is struck rather than deleted: the pass was performed in a browser and Finder, so **no transcript, no dialog capture and no screenshot of it exists**, and the section's prose was therefore **never revised against what was actually seen** — the Gatekeeper wording, the click count and the System Settings path are still the originally *drafted* text, now simply no longer labelled as such.
+- **Full Disk Access, still.** Unchanged and still needing a second Mac — the control probe (fresh bundle id + `opendir`) is the 30-second way to check whether a machine is a valid test bed. **The download pass does not settle this**; its own `Unverified` banner stays.
 - **Full Disk Access, still.** Unchanged and still needing a second Mac — the control probe (fresh bundle id + `opendir`) is the 30-second way to check whether a machine is a valid test bed.
 - **Hosting.** The DMG exists at `packaging/Oasis.dmg` (gitignored, like `dist/`); nothing publishes it yet.
 - Unchanged from the freeze spike: re-run the search-during-index regression on **lancedb 0.34.0**, or pin 0.30.2.
